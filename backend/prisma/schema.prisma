@@ -1,0 +1,41 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Project {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  environments Environment[]
+}
+
+model Environment {
+  id        String   @id @default(uuid())
+  name      String
+  projectId String
+  createdAt DateTime @default(now())
+
+  project Project  @relation(fields: [projectId], references: [id])
+  secrets Secret[]
+
+  @@unique([projectId, name])
+}
+
+model Secret {
+  id             String   @id @default(uuid())
+  key            String
+  encryptedValue Bytes
+  environmentId  String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  environment Environment @relation(fields: [environmentId], references: [id])
+
+  @@unique([environmentId, key])
+}
