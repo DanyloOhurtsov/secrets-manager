@@ -28,12 +28,19 @@ model Environment {
 }
 
 model Secret {
-  id             String   @id @default(uuid())
-  key            String
-  encryptedValue Bytes
-  environmentId  String
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id            String   @id @default(uuid())
+  key           String
+  environmentId String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  ciphertext       Bytes
+  valueIv          Bytes
+  valueAuthTag     Bytes
+  encryptedDataKey Bytes
+  dataKeyIv        Bytes
+  dataKeyAuthTag   Bytes
+  keyVersion       String
 
   environment Environment @relation(fields: [environmentId], references: [id])
 

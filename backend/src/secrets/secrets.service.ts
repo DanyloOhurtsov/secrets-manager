@@ -1,17 +1,32 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
+import { CryptoService } from '../crypto/crypto.service';
 
 @Injectable()
 export class SecretsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private crypto: CryptoService,
+  ) {}
 
   async create(environmentId: string, key: string, value: string) {
-    // ЕТАП 2: тут замість простого кодування буде encrypt(value)
-    const encryptedValue = new TextEncoder().encode(value);
+    const enc = this.crypto.encrypt(value);
+
+    const data: Prisma.SecretUncheckedCreateInput = {
+      key,
+      environmentId,
+      ciphertext: enc.ciphertext,
+      valueIv: enc.valueIv,
+      valueAuthTag: enc.valueAuthTag,
+      encryptedDataKey: enc.encryptedDataKey,
+      dataKeyIv: enc.dataKeyIv,
+      dataKeyAuthTag: enc.dataKeyAuthTag,
+      keyVersion: enc.keyVersion,
+    };
 
     return this.prisma.secret.create({
-      data: { key, encryptedValue, environmentId },
-      // не повертаємо саме значення у відповіді create — лише метадані
+      data,
       select: { id: true, key: true, environmentId: true, createdAt: true },
     });
   }
@@ -21,11 +36,18 @@ export class SecretsService {
       where: { environmentId },
     });
 
-    // ЕТАП 2: тут декодування заміниться на decrypt(...)
     return secrets.map((s) => ({
       id: s.id,
       key: s.key,
-      value: new TextDecoder().decode(s.encryptedValue),
+      value: this.crypto.decrypt({
+        ciphertext: s.ciphertext,
+        valueIv: s.valueIv,
+        valueAuthTag: s.valueAuthTag,
+        encryptedDataKey: s.encryptedDataKey,
+        dataKeyIv: s.dataKeyIv,
+        dataKeyAuthTag: s.dataKeyAuthTag,
+        keyVersion: s.keyVersion,
+      }),
       createdAt: s.createdAt,
     }));
   }
