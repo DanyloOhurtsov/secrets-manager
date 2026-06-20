@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { AuthorizationService, Role } from '../auth/authorization.service';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class SecretsService {
@@ -10,9 +11,9 @@ export class SecretsService {
     private prisma: PrismaService,
     private crypto: CryptoService,
     private authz: AuthorizationService,
+    private audit: AuditService,
   ) {}
 
-  /** Дістає оточення з його проєктом або кидає 404. */
   private async getEnvironmentOrThrow(environmentId: string) {
     const env = await this.prisma.environment.findUnique({
       where: { id: environmentId },
@@ -21,7 +22,6 @@ export class SecretsService {
     return env;
   }
 
-  /** Спільна перевірка доступу до оточення з потрібною роллю. */
   private async authorize(
     identityId: string,
     environmentId: string,
@@ -43,8 +43,7 @@ export class SecretsService {
     key: string,
     value: string,
   ) {
-    // запис вимагає developer+
-    await this.authorize(identityId, environmentId, 'developer');
+    const env = await this.authorize(identityId, environmentId, 'developer');
 
     const enc = this.crypto.encrypt(value);
 
@@ -60,18 +59,39 @@ export class SecretsService {
       keyVersion: enc.keyVersion,
     };
 
-    return this.prisma.secret.create({
+    const secret = await this.prisma.secret.create({
       data,
       select: { id: true, key: true, environmentId: true, createdAt: true },
     });
+
+    await this.audit.log({
+      actorId: identityId,
+      action: 'secret.create',
+      targetType: 'secret',
+      targetId: secret.id,
+      metadata: { key, projectId: env.projectId, environment: env.name },
+    });
+
+    return secret;
   }
 
   async findByEnvironment(identityId: string, environmentId: string) {
-    // читання вимагає readonly+
-    await this.authorize(identityId, environmentId, 'readonly');
+    const env = await this.authorize(identityId, environmentId, 'readonly');
 
     const secrets = await this.prisma.secret.findMany({
       where: { environmentId },
+    });
+
+    await this.audit.log({
+      actorId: identityId,
+      action: 'secret.read',
+      targetType: 'environment',
+      targetId: environmentId,
+      metadata: {
+        projectId: env.projectId,
+        environment: env.name,
+        count: secrets.length,
+      },
     });
 
     return secrets.map((s) => ({
@@ -94,9 +114,18 @@ export class SecretsService {
     const secret = await this.prisma.secret.findUnique({ where: { id } });
     if (!secret) throw new NotFoundException('Secret not found');
 
-    // видалення вимагає developer+
-    await this.authorize(identityId, secret.environmentId, 'developer');
+    const env = await this.authorize(identityId, secret.environmentId, 'developer');
 
-    return this.prisma.secret.delete({ where: { id } });
+    await this.prisma.secret.delete({ where: { id } });
+
+    await this.audit.log({
+      actorId: identityId,
+      action: 'secret.delete',
+      targetType: 'secret',
+      targetId: id,
+      metadata: { key: secret.key, projectId: env.projectId, environment: env.name },
+    });
+
+    return { deleted: true };
   }
 }

@@ -5,6 +5,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { AuthGuard } from './auth/auth.guard';
+import { AuditModule } from './audit/audit.module';
 import { ProjectsModule } from './projects/projects.module';
 import { EnvironmentsModule } from './environments/environments.module';
 import { SecretsModule } from './secrets/secrets.module';
@@ -14,6 +15,7 @@ import { AdminModule } from './admin/admin.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     AuthModule,
+    AuditModule,
     ProjectsModule,
     EnvironmentsModule,
     SecretsModule,
