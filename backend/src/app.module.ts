@@ -8,6 +8,7 @@ import { AuthGuard } from './auth/auth.guard';
 import { ProjectsModule } from './projects/projects.module';
 import { EnvironmentsModule } from './environments/environments.module';
 import { SecretsModule } from './secrets/secrets.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { SecretsModule } from './secrets/secrets.module';
     ProjectsModule,
     EnvironmentsModule,
     SecretsModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

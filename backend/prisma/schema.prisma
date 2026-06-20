@@ -49,10 +49,11 @@ model Secret {
 }
 
 model Identity {
-  id        String   @id @default(uuid())
-  name      String
-  type      String   // "human" | "service"
-  createdAt DateTime @default(now())
+  id           String   @id @default(uuid())
+  name         String
+  type         String   // "human" | "service"
+  isSuperadmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
 
   tokens Token[]
   grants Grant[]

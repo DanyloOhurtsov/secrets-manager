@@ -9,12 +9,10 @@ async function main() {
   const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
   const prisma = new PrismaClient({ adapter });
 
-  // 1. Створюємо першу адмін-identity
   const identity = await prisma.identity.create({
-    data: { name: 'bootstrap-admin', type: 'human' },
+    data: { name: 'bootstrap-admin', type: 'human', isSuperadmin: true },
   });
 
-  // 2. Генеруємо токен
   const token = TOKEN_PREFIX + randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(token).digest('hex');
 
@@ -22,11 +20,11 @@ async function main() {
     data: { identityId: identity.id, tokenHash, label: 'bootstrap' },
   });
 
-  console.log('\n=== BOOTSTRAP ADMIN CREATED ===');
+  console.log('\n=== BOOTSTRAP SUPERADMIN CREATED ===');
   console.log('Identity ID:', identity.id);
   console.log('TOKEN (save it now, shown only once):');
   console.log(token);
-  console.log('================================\n');
+  console.log('====================================\n');
 
   await prisma.$disconnect();
 }
