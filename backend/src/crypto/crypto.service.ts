@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnprocessableEntityException } from '@nestjs/common';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { KeyProvider } from './key-provider.service';
 
@@ -16,7 +16,6 @@ export interface EncryptedSecret {
   keyVersion: string;
 }
 
-/** Копіює байти у власний ArrayBuffer, щоб тип був строго Uint8Array<ArrayBuffer>. */
 function toBytes(input: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(input.length);
   out.set(input);
@@ -77,22 +76,30 @@ export class CryptoService {
     dataKeyAuthTag: Uint8Array;
     keyVersion: string;
   }): string {
-    const masterKey = this.keyProvider.getKey(data.keyVersion);
+    try {
+      const masterKey = this.keyProvider.getKey(data.keyVersion);
 
-    const dataKey = this.decryptWithKey(
-      masterKey,
-      data.encryptedDataKey,
-      data.dataKeyIv,
-      data.dataKeyAuthTag,
-    );
+      const dataKey = this.decryptWithKey(
+        masterKey,
+        data.encryptedDataKey,
+        data.dataKeyIv,
+        data.dataKeyAuthTag,
+      );
 
-    const plaintext = this.decryptWithKey(
-      dataKey,
-      data.ciphertext,
-      data.valueIv,
-      data.valueAuthTag,
-    );
+      const plaintext = this.decryptWithKey(
+        dataKey,
+        data.ciphertext,
+        data.valueIv,
+        data.valueAuthTag,
+      );
 
-    return plaintext.toString('utf-8');
+      return plaintext.toString('utf-8');
+    } catch {
+      // GCM не зміг автентифікувати дані: підміна, пошкодження або невірний ключ.
+      // Це не баг сервера, а порушення цілісності — окремий контрольований стан.
+      throw new UnprocessableEntityException(
+        'Secret integrity check failed — data may be corrupted or tampered with',
+      );
+    }
   }
 }

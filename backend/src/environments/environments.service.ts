@@ -5,7 +5,12 @@ import { PrismaService } from '../prisma.service';
 export class EnvironmentsService {
   constructor(private prisma: PrismaService) {}
 
-  create(projectId: string, name: string) {
+  async create(projectId: string, name: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
     return this.prisma.environment.create({
       data: { name, projectId },
     });
