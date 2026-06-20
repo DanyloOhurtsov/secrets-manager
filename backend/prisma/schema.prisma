@@ -13,6 +13,7 @@ model Project {
   createdAt DateTime @default(now())
 
   environments Environment[]
+  grants       Grant[]
 }
 
 model Environment {
@@ -45,4 +46,50 @@ model Secret {
   environment Environment @relation(fields: [environmentId], references: [id])
 
   @@unique([environmentId, key])
+}
+
+model Identity {
+  id        String   @id @default(uuid())
+  name      String
+  type      String   // "human" | "service"
+  createdAt DateTime @default(now())
+
+  tokens Token[]
+  grants Grant[]
+}
+
+model Token {
+  id         String    @id @default(uuid())
+  identityId String
+  tokenHash  String    @unique
+  label      String?
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+
+  identity Identity @relation(fields: [identityId], references: [id])
+}
+
+model Grant {
+  id          String   @id @default(uuid())
+  identityId  String
+  projectId   String
+  environment String?
+  role        String   // "admin" | "developer" | "readonly"
+  createdAt   DateTime @default(now())
+
+  identity Identity @relation(fields: [identityId], references: [id])
+  project  Project  @relation(fields: [projectId], references: [id])
+
+  @@unique([identityId, projectId, environment])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  action     String
+  targetType String
+  targetId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
 }

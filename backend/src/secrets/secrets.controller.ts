@@ -7,6 +7,7 @@ import {
   Param,
 } from '@nestjs/common';
 import { SecretsService } from './secrets.service';
+import { CurrentIdentity } from '../auth/current-identity.decorator';
 
 @Controller('environments/:environmentId/secrets')
 export class SecretsController {
@@ -14,19 +15,31 @@ export class SecretsController {
 
   @Post()
   create(
+    @CurrentIdentity() identity: { id: string },
     @Param('environmentId') environmentId: string,
     @Body() body: { key: string; value: string },
   ) {
-    return this.secretsService.create(environmentId, body.key, body.value);
+    return this.secretsService.create(
+      identity.id,
+      environmentId,
+      body.key,
+      body.value,
+    );
   }
 
   @Get()
-  findByEnvironment(@Param('environmentId') environmentId: string) {
-    return this.secretsService.findByEnvironment(environmentId);
+  findByEnvironment(
+    @CurrentIdentity() identity: { id: string },
+    @Param('environmentId') environmentId: string,
+  ) {
+    return this.secretsService.findByEnvironment(identity.id, environmentId);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.secretsService.remove(id);
+  remove(
+    @CurrentIdentity() identity: { id: string },
+    @Param('id') id: string,
+  ) {
+    return this.secretsService.remove(identity.id, id);
   }
 }
