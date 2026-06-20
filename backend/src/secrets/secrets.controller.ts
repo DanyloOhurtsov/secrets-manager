@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { SecretsService } from './secrets.service';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
+import { CreateSecretDto } from './dto';
 
 @Controller('environments/:environmentId/secrets')
 export class SecretsController {
@@ -17,7 +18,7 @@ export class SecretsController {
   create(
     @CurrentIdentity() identity: { id: string },
     @Param('environmentId') environmentId: string,
-    @Body() body: { key: string; value: string },
+    @Body() body: CreateSecretDto,
   ) {
     return this.secretsService.create(
       identity.id,

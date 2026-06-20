@@ -9,15 +9,15 @@ import {
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { SuperadminGuard } from '../auth/superadmin.guard';
+import { CreateIdentityDto, IssueTokenDto, CreateGrantDto } from './dto';
 
 @Controller('admin')
 @UseGuards(SuperadminGuard)
 export class AdminController {
   constructor(private readonly admin: AdminService) {}
 
-  // --- Identity ---
   @Post('identities')
-  createIdentity(@Body() body: { name: string; type: string }) {
+  createIdentity(@Body() body: CreateIdentityDto) {
     return this.admin.createIdentity(body.name, body.type);
   }
 
@@ -26,11 +26,10 @@ export class AdminController {
     return this.admin.listIdentities();
   }
 
-  // --- Tokens ---
   @Post('identities/:identityId/tokens')
   issueToken(
     @Param('identityId') identityId: string,
-    @Body() body: { label?: string },
+    @Body() body: IssueTokenDto,
   ) {
     return this.admin.issueToken(identityId, body.label);
   }
@@ -45,11 +44,10 @@ export class AdminController {
     return this.admin.revokeToken(tokenId);
   }
 
-  // --- Grants ---
   @Post('identities/:identityId/grants')
   createGrant(
     @Param('identityId') identityId: string,
-    @Body() body: { projectId: string; role: string; environment?: string },
+    @Body() body: CreateGrantDto,
   ) {
     return this.admin.createGrant(
       identityId,

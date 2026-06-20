@@ -7,6 +7,7 @@ import {
   Param,
 } from '@nestjs/common';
 import { EnvironmentsService } from './environments.service';
+import { CreateEnvironmentDto } from './dto';
 
 @Controller('projects/:projectId/environments')
 export class EnvironmentsController {
@@ -15,7 +16,7 @@ export class EnvironmentsController {
   @Post()
   create(
     @Param('projectId') projectId: string,
-    @Body() body: { name: string },
+    @Body() body: CreateEnvironmentDto,
   ) {
     return this.environmentsService.create(projectId, body.name);
   }
