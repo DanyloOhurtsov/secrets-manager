@@ -1,12 +1,39 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class ProjectsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private audit: AuditService,
+  ) {}
 
-  create(name: string) {
-    return this.prisma.project.create({ data: { name } });
+  async create(actorId: string, name: string) {
+    // Проєкт + admin-grant творцю — атомарно в одній транзакції.
+    // Якщо щось упаде, не лишиться "осиротілого" проєкту без доступу.
+    const project = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.project.create({ data: { name } });
+      await tx.grant.create({
+        data: {
+          identityId: actorId,
+          projectId: created.id,
+          environment: null,
+          role: 'admin',
+        },
+      });
+      return created;
+    });
+
+    await this.audit.log({
+      actorId,
+      action: 'project.create',
+      targetType: 'project',
+      targetId: project.id,
+      metadata: { name },
+    });
+
+    return project;
   }
 
   findAll() {
