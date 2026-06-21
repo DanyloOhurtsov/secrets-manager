@@ -6,6 +6,7 @@ import {
   Body,
   Param,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { SecretsService } from './secrets.service';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
 import { CreateSecretDto } from './dto';
@@ -29,6 +30,7 @@ export class SecretsController {
   }
 
   @Get()
+  @Throttle({ strict: { limit: 10, ttl: 60000 } })
   findByEnvironment(
     @CurrentIdentity() identity: { id: string },
     @Param('environmentId') environmentId: string,
