@@ -16,6 +16,14 @@ export interface EncryptedSecret {
   keyVersion: string;
 }
 
+// Результат перепакування data-key (значення секрету не зачіпається)
+export interface RewrappedDataKey {
+  encryptedDataKey: Uint8Array<ArrayBuffer>;
+  dataKeyIv: Uint8Array<ArrayBuffer>;
+  dataKeyAuthTag: Uint8Array<ArrayBuffer>;
+  keyVersion: string;
+}
+
 function toBytes(input: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(input.length);
   out.set(input);
@@ -95,11 +103,46 @@ export class CryptoService {
 
       return plaintext.toString('utf-8');
     } catch {
-      // GCM не зміг автентифікувати дані: підміна, пошкодження або невірний ключ.
-      // Це не баг сервера, а порушення цілісності — окремий контрольований стан.
       throw new UnprocessableEntityException(
         'Secret integrity check failed — data may be corrupted or tampered with',
       );
     }
+  }
+
+  /**
+   * Перепаковує data-key зі старої версії master-ключа в активну.
+   * Значення секрету (ciphertext) НЕ зачіпається — лише "конверт" навколо data-key.
+   * Якщо секрет уже на активній версії — повертає null (нема що робити).
+   */
+  rewrapDataKey(data: {
+    encryptedDataKey: Uint8Array;
+    dataKeyIv: Uint8Array;
+    dataKeyAuthTag: Uint8Array;
+    keyVersion: string;
+  }): RewrappedDataKey | null {
+    const activeVersion = this.keyProvider.getActiveVersion();
+    if (data.keyVersion === activeVersion) {
+      return null; // вже на активній версії
+    }
+
+    // 1. Розшифровуємо data-key старим master-ключем
+    const oldMasterKey = this.keyProvider.getKey(data.keyVersion);
+    const dataKey = this.decryptWithKey(
+      oldMasterKey,
+      data.encryptedDataKey,
+      data.dataKeyIv,
+      data.dataKeyAuthTag,
+    );
+
+    // 2. Перешифровуємо data-key новим (активним) master-ключем
+    const newMasterKey = this.keyProvider.getKey(activeVersion);
+    const reEnc = this.encryptWithKey(newMasterKey, dataKey);
+
+    return {
+      encryptedDataKey: toBytes(reEnc.ciphertext),
+      dataKeyIv: toBytes(reEnc.iv),
+      dataKeyAuthTag: toBytes(reEnc.authTag),
+      keyVersion: activeVersion,
+    };
   }
 }

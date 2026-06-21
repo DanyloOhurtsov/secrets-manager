@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { RotationService } from './rotation.service';
 import { SuperadminGuard } from '../auth/superadmin.guard';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
 import { CreateIdentityDto, IssueTokenDto, CreateGrantDto } from './dto';
@@ -15,7 +16,10 @@ import { CreateIdentityDto, IssueTokenDto, CreateGrantDto } from './dto';
 @Controller('admin')
 @UseGuards(SuperadminGuard)
 export class AdminController {
-  constructor(private readonly admin: AdminService) {}
+  constructor(
+    private readonly admin: AdminService,
+    private readonly rotation: RotationService,
+  ) {}
 
   @Post('identities')
   createIdentity(
@@ -84,5 +88,11 @@ export class AdminController {
   @Get('audit')
   listAuditLog() {
     return this.admin.listAuditLog();
+  }
+
+  // --- Key rotation ---
+  @Post('rotate-keys')
+  rotateKeys(@CurrentIdentity() actor: { id: string }) {
+    return this.rotation.rotate(actor.id);
   }
 }

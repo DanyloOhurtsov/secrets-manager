@@ -4,6 +4,6 @@ import { KeyProvider } from './key-provider.service';
 
 @Module({
   providers: [CryptoService, KeyProvider],
-  exports: [CryptoService],
+  exports: [CryptoService, KeyProvider],
 })
 export class CryptoModule {}

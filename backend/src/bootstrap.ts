@@ -9,6 +9,22 @@ async function main() {
   const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
   const prisma = new PrismaClient({ adapter });
 
+  // Не плодимо дублів: якщо superadmin уже є — зупиняємось
+  const existing = await prisma.identity.findFirst({
+    where: { isSuperadmin: true },
+  });
+
+  if (existing) {
+    console.log('\n=== BOOTSTRAP SKIPPED ===');
+    console.log(`A superadmin already exists: ${existing.name} (${existing.id})`);
+    console.log('To issue a new token, use the admin API:');
+    console.log(`  POST /admin/identities/${existing.id}/tokens`);
+    console.log('Or reset the database to start fresh.');
+    console.log('=========================\n');
+    await prisma.$disconnect();
+    return;
+  }
+
   const identity = await prisma.identity.create({
     data: { name: 'bootstrap-admin', type: 'human', isSuperadmin: true },
   });
