@@ -1,0 +1,27 @@
+{
+  "name": "@secrets-manager/cli",
+  "version": "0.1.0",
+  "description": "CLI for the Secrets Manager — inject secrets as environment variables",
+  "bin": {
+    "secrets": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": ["secrets", "cli", "env"],
+  "author": "Danylo Ohurtsov",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
