@@ -1,23 +1,35 @@
 import { Injectable } from '@nestjs/common';
 import { randomBytes, createHash } from 'node:crypto';
 import { PrismaService } from '../prisma.service';
+import { CacheService } from '../cache/cache.service';
 
 const TOKEN_PREFIX = 'sm_';
 const TOKEN_BYTES = 32;
+const CACHE_TTL_SECONDS = 30;
+
+// що кешуємо: мінімум для авторизації
+interface CachedIdentity {
+  id: string;
+  name: string;
+  type: string;
+  isSuperadmin: boolean;
+}
 
 @Injectable()
 export class TokenService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private cache: CacheService,
+  ) {}
 
-  /** Хешуємо токен через SHA-256 (швидкий — для високоентропійних токенів це правильно). */
   private hash(token: string): string {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  /**
-   * Створює новий токен для Identity.
-   * Повертає САМ токен — його показують користувачу один раз і більше ніде не зберігають.
-   */
+  private cacheKey(tokenHash: string): string {
+    return `token:${tokenHash}`;
+  }
+
   async issue(identityId: string, label?: string): Promise<string> {
     const token = TOKEN_PREFIX + randomBytes(TOKEN_BYTES).toString('hex');
     const tokenHash = this.hash(token);
@@ -29,13 +41,15 @@ export class TokenService {
     return token;
   }
 
-  /**
-   * Перевіряє токен. Повертає Identity, якщо токен валідний,
-   * або null якщо ні (не знайдено / відкликано / протерміновано).
-   */
-  async verify(token: string) {
+  async verify(token: string): Promise<CachedIdentity | null> {
     const tokenHash = this.hash(token);
+    const key = this.cacheKey(tokenHash);
 
+    // 1. Спершу кеш
+    const cached = await this.cache.get<CachedIdentity>(key);
+    if (cached) return cached;
+
+    // 2. Кеш-промах → БД
     const record = await this.prisma.token.findUnique({
       where: { tokenHash },
       include: { identity: true },
@@ -45,14 +59,29 @@ export class TokenService {
     if (record.revokedAt) return null;
     if (record.expiresAt && record.expiresAt < new Date()) return null;
 
-    return record.identity;
+    const identity: CachedIdentity = {
+      id: record.identity.id,
+      name: record.identity.name,
+      type: record.identity.type,
+      isSuperadmin: record.identity.isSuperadmin,
+    };
+
+    // 3. Кладемо в кеш із коротким TTL (страховка на випадок збою інвалідації)
+    await this.cache.set(key, identity, CACHE_TTL_SECONDS);
+
+    return identity;
   }
 
-  /** Відкликає токен (м'яко — лишаємо для аудиту). */
+  /** Відкликає токен (м'яко) + миттєво інвалідує кеш. */
   async revoke(tokenId: string) {
-    return this.prisma.token.update({
+    const token = await this.prisma.token.update({
       where: { id: tokenId },
       data: { revokedAt: new Date() },
     });
+
+    // миттєва інвалідація: відкликаний токен одразу перестає працювати
+    await this.cache.del(this.cacheKey(token.tokenHash));
+
+    return token;
   }
 }

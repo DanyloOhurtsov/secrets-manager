@@ -7,6 +7,7 @@ import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { AuthGuard } from './auth/auth.guard';
 import { AuditModule } from './audit/audit.module';
+import { CacheModule } from './cache/cache.module';
 import { ProjectsModule } from './projects/projects.module';
 import { EnvironmentsModule } from './environments/environments.module';
 import { SecretsModule } from './secrets/secrets.module';
@@ -21,6 +22,7 @@ import { AdminModule } from './admin/admin.module';
     ]),
     AuthModule,
     AuditModule,
+    CacheModule,
     ProjectsModule,
     EnvironmentsModule,
     SecretsModule,
@@ -29,7 +31,6 @@ import { AdminModule } from './admin/admin.module';
   controllers: [AppController],
   providers: [
     AppService,
-    // Throttler першим — відсікає флуд до перевірки токена
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
