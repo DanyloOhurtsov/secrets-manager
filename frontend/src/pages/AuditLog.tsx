@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
-import { listAuditLog, type AuditEntry } from '@/lib/admin';
+import { useEffect, useMemo, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
+import {
+  listAuditActions,
+  listAuditLog,
+  type AuditEntry,
+} from '@/lib/admin';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { Select } from '@/components/ui/select';
 import {
   Table,
   TableBody,
@@ -13,38 +17,33 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-const auditActionGroups = [
-  {
-    label: 'Auth',
-    actions: ['auth.signup', 'auth.login'],
-  },
-  {
-    label: 'Projects',
-    actions: ['project.create', 'project.delete'],
-  },
-  {
-    label: 'Environments',
-    actions: ['environment.create', 'environment.delete'],
-  },
-  {
-    label: 'Secrets',
-    actions: ['secret.create', 'secret.list', 'secret.reveal', 'secret.delete'],
-  },
-  {
-    label: 'Access',
-    actions: [
-      'identity.create',
-      'token.issue',
-      'token.revoke',
-      'grant.create',
-      'grant.revoke',
-    ],
-  },
-  {
-    label: 'System',
-    actions: ['key_rotation.complete'],
-  },
-];
+const actionGroupLabels: Record<string, string> = {
+  auth: 'Auth',
+  environment: 'Environments',
+  grant: 'Access',
+  identity: 'Access',
+  key_rotation: 'System',
+  project: 'Projects',
+  secret: 'Secrets',
+  token: 'Access',
+};
+
+function groupAuditActions(actions: string[]) {
+  const groups = new Map<string, string[]>();
+
+  for (const action of actions) {
+    const key = action.startsWith('key_rotation')
+      ? 'key_rotation'
+      : action.split('.')[0];
+    const label = actionGroupLabels[key] ?? 'Other';
+    groups.set(label, [...(groups.get(label) ?? []), action]);
+  }
+
+  return [...groups.entries()].map(([label, groupActions]) => ({
+    label,
+    actions: groupActions,
+  }));
+}
 
 function actionStyle(action: string): {
   variant: 'default' | 'secondary' | 'destructive';
@@ -62,56 +61,129 @@ function actionStyle(action: string): {
 
 export function AuditLog() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [availableActions, setAvailableActions] = useState<string[]>([]);
+  const [selectedActions, setSelectedActions] = useState<string[]>([]);
+  const [selectorOpen, setSelectorOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [action, setAction] = useState('');
 
-  async function load(selectedAction = action) {
+  const availableActionSet = useMemo(
+    () => new Set(availableActions),
+    [availableActions],
+  );
+  const selectedAvailableActions = selectedActions.filter((action) =>
+    availableActionSet.has(action),
+  );
+  const actionGroups = useMemo(
+    () => groupAuditActions(availableActions),
+    [availableActions],
+  );
+  const selectedSummary =
+    availableActions.length === 0
+      ? 'No events yet'
+      : selectedAvailableActions.length === 0
+        ? 'All events'
+        : selectedAvailableActions.length <= 2
+          ? selectedAvailableActions.join(', ')
+          : `${selectedAvailableActions.length} events selected`;
+
+  async function load(actions = selectedActions) {
     setLoading(true);
     setError('');
-    listAuditLog({ action: selectedAction || undefined })
-      .then(setEntries)
+    Promise.all([
+      listAuditActions(),
+      listAuditLog({ action: actions.length > 0 ? actions : undefined }),
+    ])
+      .then(([nextActions, nextEntries]) => {
+        setAvailableActions([...nextActions].sort((a, b) => a.localeCompare(b)));
+        setEntries(nextEntries);
+      })
       .catch((err) =>
         setError(err instanceof Error ? err.message : 'Failed to load'),
       )
       .finally(() => setLoading(false));
   }
 
+  function toggleAction(action: string) {
+    setSelectedActions((current) =>
+      current.includes(action)
+        ? current.filter((item) => item !== action)
+        : [...current, action],
+    );
+  }
+
   useEffect(() => {
-    void load(action);
+    void load(selectedActions);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [action]);
+  }, [selectedActions]);
+
+  useEffect(() => {
+    setSelectedActions((current) => {
+      const next = current.filter((action) => availableActionSet.has(action));
+      const unchanged =
+        next.length === current.length &&
+        next.every((action, index) => action === current[index]);
+
+      return unchanged ? current : next;
+    });
+  }, [availableActionSet]);
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-        <div className="flex flex-col gap-2 sm:w-80">
+        <div className="relative flex flex-col gap-2 sm:w-96">
           <Label htmlFor="audit-action">Event</Label>
-          <Select
+          <Button
+            type="button"
+            variant="outline"
             id="audit-action"
-            value={action}
-            onChange={(e) => setAction(e.target.value)}
-            disabled={loading}
+            className="w-full justify-between"
+            onClick={() => setSelectorOpen((open) => !open)}
+            disabled={loading || availableActions.length === 0}
           >
-            <option value="">All events</option>
-            {auditActionGroups.map((group) => (
-              <optgroup key={group.label} label={group.label}>
-                {group.actions.map((eventAction) => (
-                  <option key={eventAction} value={eventAction}>
-                    {eventAction}
-                  </option>
+            <span className="truncate text-left">{selectedSummary}</span>
+            <ChevronDown className="size-4 text-muted-foreground" />
+          </Button>
+          {selectorOpen && availableActions.length > 0 && (
+            <div className="absolute top-full left-0 z-20 mt-1 w-full rounded-lg border bg-popover p-1 text-popover-foreground shadow-md">
+              <div className="max-h-72 overflow-auto">
+                {actionGroups.map((group) => (
+                  <div key={group.label} className="py-1">
+                    <div className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                      {group.label}
+                    </div>
+                    {group.actions.map((eventAction) => (
+                      <label
+                        key={eventAction}
+                        className="flex min-h-8 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
+                      >
+                        <input
+                          type="checkbox"
+                          className="size-4 rounded border-input"
+                          checked={selectedAvailableActions.includes(
+                            eventAction,
+                          )}
+                          onChange={() => toggleAction(eventAction)}
+                          disabled={loading}
+                        />
+                        <span className="truncate font-mono text-xs">
+                          {eventAction}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
                 ))}
-              </optgroup>
-            ))}
-          </Select>
+              </div>
+            </div>
+          )}
         </div>
-        <Button onClick={() => void load()} disabled={loading}>
+        <Button onClick={() => void load(selectedActions)} disabled={loading}>
           Refresh
         </Button>
         <Button
           variant="outline"
-          onClick={() => setAction('')}
-          disabled={loading || action === ''}
+          onClick={() => setSelectedActions([])}
+          disabled={loading || selectedActions.length === 0}
         >
           Clear
         </Button>

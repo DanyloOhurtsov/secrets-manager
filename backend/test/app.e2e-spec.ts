@@ -176,6 +176,29 @@ describe('AppController (e2e)', () => {
       .expect(200);
     expect(secretCreateAudit.body).toHaveLength(1);
 
+    const availableAuditActions = await request(app.getHttpServer())
+      .get(`/audit/actions?organizationId=${organizationId}`)
+      .set('Authorization', `Bearer ${aliceSession}`)
+      .expect(200);
+    expect(availableAuditActions.body).toEqual(
+      expect.arrayContaining(['project.create', 'secret.create']),
+    );
+
+    const multiActionAudit = await request(app.getHttpServer())
+      .get(
+        `/audit?organizationId=${organizationId}&action=project.create&action=secret.create`,
+      )
+      .set('Authorization', `Bearer ${aliceSession}`)
+      .expect(200);
+    expect(
+      multiActionAudit.body.map((entry: { action: string }) => entry.action),
+    ).toEqual(expect.arrayContaining(['project.create', 'secret.create']));
+    expect(
+      multiActionAudit.body.every((entry: { action: string }) =>
+        ['project.create', 'secret.create'].includes(entry.action),
+      ),
+    ).toBe(true);
+
     await request(app.getHttpServer())
       .get(`/audit?projectId=${projectId}`)
       .set('Authorization', `Bearer ${bobSession}`)

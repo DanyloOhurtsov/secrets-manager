@@ -13,6 +13,7 @@ import { RotationService } from './rotation.service';
 import { SuperadminGuard } from '../auth/superadmin.guard';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
 import { CreateIdentityDto, IssueTokenDto, CreateGrantDto } from './dto';
+import { parseQueryList } from './audit-query';
 
 @Controller('admin')
 @UseGuards(SuperadminGuard)
@@ -96,13 +97,26 @@ export class AdminController {
   // --- Audit ---
   @Get('audit')
   listAuditLog(
-    @Query('action') action?: string,
+    @Query('action') action?: string | string[],
     @Query('organizationId') organizationId?: string,
     @Query('projectId') projectId?: string,
     @Query('environmentId') environmentId?: string,
   ) {
     return this.admin.listAuditLog(100, {
-      action,
+      actions: parseQueryList(action),
+      organizationId,
+      projectId,
+      environmentId,
+    });
+  }
+
+  @Get('audit/actions')
+  listAuditActions(
+    @Query('organizationId') organizationId?: string,
+    @Query('projectId') projectId?: string,
+    @Query('environmentId') environmentId?: string,
+  ) {
+    return this.admin.listAuditActions({
       organizationId,
       projectId,
       environmentId,

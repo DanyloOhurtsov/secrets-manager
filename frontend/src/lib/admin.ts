@@ -91,18 +91,43 @@ export function revokeGrant(grantId: string) {
 
 // --- Audit ---
 export interface AuditFilters {
-  action?: string;
+  action?: string | string[];
   organizationId?: string;
   projectId?: string;
   environmentId?: string;
 }
 
-export function listAuditLog(filters: AuditFilters = {}) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) {
-    if (value) params.set(key, value);
+function appendQueryParam(
+  params: URLSearchParams,
+  key: string,
+  value?: string | string[],
+) {
+  if (!value) return;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (item) params.append(key, item);
+    }
+    return;
   }
+  params.set(key, value);
+}
 
-  const query = params.toString();
+function auditQuery(filters: AuditFilters = {}) {
+  const params = new URLSearchParams();
+  appendQueryParam(params, 'action', filters.action);
+  appendQueryParam(params, 'organizationId', filters.organizationId);
+  appendQueryParam(params, 'projectId', filters.projectId);
+  appendQueryParam(params, 'environmentId', filters.environmentId);
+
+  return params.toString();
+}
+
+export function listAuditLog(filters: AuditFilters = {}) {
+  const query = auditQuery(filters);
   return api<AuditEntry[]>(`/audit${query ? `?${query}` : ''}`);
+}
+
+export function listAuditActions(filters: Omit<AuditFilters, 'action'> = {}) {
+  const query = auditQuery(filters);
+  return api<string[]>(`/audit/actions${query ? `?${query}` : ''}`);
 }

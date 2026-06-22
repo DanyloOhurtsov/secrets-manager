@@ -19,6 +19,104 @@ export class AdminService {
     private authz: AuthorizationService,
   ) {}
 
+  private withAuditActionFilter(
+    where: Prisma.AuditLogWhereInput,
+    actions?: string[],
+  ): Prisma.AuditLogWhereInput {
+    if (!actions || actions.length === 0) return where;
+
+    return {
+      ...where,
+      action: { in: actions },
+    };
+  }
+
+  private async buildAuditScopeWhereForActor(
+    actor: AuthPrincipal,
+    filters?: {
+      organizationId?: string;
+      projectId?: string;
+      environmentId?: string;
+    },
+  ): Promise<Prisma.AuditLogWhereInput> {
+    if (actor.isSuperadmin) {
+      return {
+        organizationId: filters?.organizationId,
+        projectId: filters?.projectId,
+        environmentId: filters?.environmentId,
+      };
+    }
+
+    if (filters?.environmentId) {
+      const environment = await this.prisma.environment.findUnique({
+        where: { id: filters.environmentId },
+        select: { id: true, projectId: true },
+      });
+      if (!environment) throw new NotFoundException('Environment not found');
+      await this.authz.checkProjectAccess(
+        actor,
+        environment.projectId,
+        'manageProject',
+        environment.id,
+      );
+
+      return {
+        environmentId: environment.id,
+        projectId: environment.projectId,
+      };
+    }
+
+    if (filters?.projectId) {
+      await this.authz.checkProjectAccess(
+        actor,
+        filters.projectId,
+        'manageProject',
+      );
+
+      return { projectId: filters.projectId };
+    }
+
+    if (filters?.organizationId) {
+      await this.authz.assertOrganizationAdmin(
+        actor.id,
+        filters.organizationId,
+      );
+
+      return { organizationId: filters.organizationId };
+    }
+
+    const adminMemberships = await this.prisma.organizationMembership.findMany({
+      where: {
+        identityId: actor.id,
+        role: { in: ['owner', 'admin'] },
+      },
+      select: { organizationId: true },
+    });
+    const adminGrants = await this.prisma.grant.findMany({
+      where: {
+        identityId: actor.id,
+        OR: [{ role: 'admin' }, { canManageGrants: true }],
+      },
+      select: { projectId: true },
+    });
+
+    const organizationIds = adminMemberships.map((m) => m.organizationId);
+    const projectIds = [...new Set(adminGrants.map((g) => g.projectId))];
+
+    if (organizationIds.length === 0 && projectIds.length === 0) {
+      throw new ForbiddenException('Audit access required');
+    }
+
+    return {
+      OR: [
+        ...(organizationIds.length > 0
+          ? [{ organizationId: { in: organizationIds } }]
+          : []),
+        ...(projectIds.length > 0 ? [{ projectId: { in: projectIds } }] : []),
+      ],
+    };
+  }
+
   // --- Identity ---
   async createIdentity(actorId: string, name: string, type: string) {
     const identity = await this.prisma.identity.create({
@@ -220,28 +318,68 @@ export class AdminService {
   listAuditLog(
     limit = 100,
     filters?: {
-      action?: string;
+      actions?: string[];
       organizationId?: string;
       projectId?: string;
       environmentId?: string;
     },
   ) {
     return this.prisma.auditLog.findMany({
-      where: {
-        action: filters?.action,
-        organizationId: filters?.organizationId,
-        projectId: filters?.projectId,
-        environmentId: filters?.environmentId,
-      },
+      where: this.withAuditActionFilter(
+        {
+          organizationId: filters?.organizationId,
+          projectId: filters?.projectId,
+          environmentId: filters?.environmentId,
+        },
+        filters?.actions,
+      ),
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
   }
 
+  listAuditActions(filters?: {
+    organizationId?: string;
+    projectId?: string;
+    environmentId?: string;
+  }) {
+    return this.prisma.auditLog
+      .findMany({
+        where: {
+          organizationId: filters?.organizationId,
+          projectId: filters?.projectId,
+          environmentId: filters?.environmentId,
+        },
+        select: { action: true },
+        distinct: ['action'],
+        orderBy: { action: 'asc' },
+      })
+      .then((rows) => rows.map((row) => row.action));
+  }
+
+  async listAuditActionsForActor(
+    actor: AuthPrincipal,
+    filters?: {
+      organizationId?: string;
+      projectId?: string;
+      environmentId?: string;
+    },
+  ) {
+    const where = await this.buildAuditScopeWhereForActor(actor, filters);
+    const rows = await this.prisma.auditLog.findMany({
+      where,
+      select: { action: true },
+      distinct: ['action'],
+      orderBy: { action: 'asc' },
+    });
+
+    return rows.map((row) => row.action);
+  }
+
   async listAuditForActor(
     actor: AuthPrincipal,
     filters?: {
-      action?: string;
+      actions?: string[];
       organizationId?: string;
       projectId?: string;
       environmentId?: string;
@@ -252,90 +390,15 @@ export class AdminService {
       return this.listAuditLog(limit, filters);
     }
 
-    const where: Prisma.AuditLogWhereInput = {
-      action: filters?.action,
-    };
-
-    if (filters?.environmentId) {
-      const environment = await this.prisma.environment.findUnique({
-        where: { id: filters.environmentId },
-        select: { id: true, projectId: true },
-      });
-      if (!environment) throw new NotFoundException('Environment not found');
-      await this.authz.checkProjectAccess(
-        actor,
-        environment.projectId,
-        'manageProject',
-        environment.id,
-      );
-      where.environmentId = environment.id;
-      where.projectId = environment.projectId;
-      return this.prisma.auditLog.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-      });
-    }
-
-    if (filters?.projectId) {
-      await this.authz.checkProjectAccess(
-        actor,
-        filters.projectId,
-        'manageProject',
-      );
-      where.projectId = filters.projectId;
-      return this.prisma.auditLog.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-      });
-    }
-
-    if (filters?.organizationId) {
-      await this.authz.assertOrganizationAdmin(
-        actor.id,
-        filters.organizationId,
-      );
-      where.organizationId = filters.organizationId;
-      return this.prisma.auditLog.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-      });
-    }
-
-    const adminMemberships = await this.prisma.organizationMembership.findMany({
-      where: {
-        identityId: actor.id,
-        role: { in: ['owner', 'admin'] },
-      },
-      select: { organizationId: true },
+    const scopeWhere = await this.buildAuditScopeWhereForActor(actor, {
+      organizationId: filters?.organizationId,
+      projectId: filters?.projectId,
+      environmentId: filters?.environmentId,
     });
-    const adminGrants = await this.prisma.grant.findMany({
-      where: {
-        identityId: actor.id,
-        OR: [{ role: 'admin' }, { canManageGrants: true }],
-      },
-      select: { projectId: true },
-    });
-
-    const organizationIds = adminMemberships.map((m) => m.organizationId);
-    const projectIds = [...new Set(adminGrants.map((g) => g.projectId))];
-
-    if (organizationIds.length === 0 && projectIds.length === 0) {
-      throw new ForbiddenException('Audit access required');
-    }
+    const where = this.withAuditActionFilter(scopeWhere, filters?.actions);
 
     return this.prisma.auditLog.findMany({
-      where: {
-        ...where,
-        OR: [
-          ...(organizationIds.length > 0
-            ? [{ organizationId: { in: organizationIds } }]
-            : []),
-          ...(projectIds.length > 0 ? [{ projectId: { in: projectIds } }] : []),
-        ],
-      },
+      where,
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
