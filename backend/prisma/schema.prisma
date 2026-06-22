@@ -51,7 +51,7 @@ model Secret {
 model Identity {
   id           String   @id @default(uuid())
   name         String
-  type         String   // "human" | "service"
+  type         String // "human" | "service"
   isSuperadmin Boolean  @default(false)
   createdAt    DateTime @default(now())
 
@@ -76,7 +76,7 @@ model Grant {
   identityId  String
   projectId   String
   environment String?
-  role        String   // "admin" | "developer" | "readonly"
+  role        String // "admin" | "developer" | "readonly"
   createdAt   DateTime @default(now())
 
   identity Identity @relation(fields: [identityId], references: [id])
@@ -88,6 +88,7 @@ model Grant {
 model AuditLog {
   id         String   @id @default(uuid())
   actorId    String
+  actorName  String
   action     String
   targetType String
   targetId   String

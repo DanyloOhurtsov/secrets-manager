@@ -18,9 +18,17 @@ export class AuditService {
 
   async log(entry: AuditEntry): Promise<void> {
     try {
+      // Дістаємо ім'я актора. Запис в журналі має бути самодостатнім,
+      // тож зберігаємо ім'я в момент події — навіть якщо identity потім видалять.
+      const actor = await this.prisma.identity.findUnique({
+        where: { id: entry.actorId },
+        select: { name: true },
+      });
+
       await this.prisma.auditLog.create({
         data: {
           actorId: entry.actorId,
+          actorName: actor?.name ?? 'unknown',
           action: entry.action,
           targetType: entry.targetType,
           targetId: entry.targetId,

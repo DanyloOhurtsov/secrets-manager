@@ -3,10 +3,12 @@ import { TokenService } from './token.service';
 import { AuthGuard } from './auth.guard';
 import { AuthorizationService } from './authorization.service';
 import { SuperadminGuard } from './superadmin.guard';
+import { AuthController } from './auth.controller';
 import { PrismaService } from '../prisma.service';
 
 @Global()
 @Module({
+  controllers: [AuthController],
   providers: [
     TokenService,
     AuthGuard,
