@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { listProjects, createProject, type Project } from '@/lib/projects';
+import { useState } from 'react';
+import { useProjects } from '@/lib/projects-context';
+import type { Project } from '@/lib/projects';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -19,39 +20,22 @@ interface ProjectsProps {
 }
 
 export function Projects({ onSelect }: ProjectsProps) {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const { projects, loading, error, create } = useProjects();
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
-
-  async function load() {
-    setLoading(true);
-    setError('');
-    try {
-      setProjects(await listProjects());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void load();
-  }, []);
+  const [createError, setCreateError] = useState('');
 
   async function handleCreate() {
     setCreating(true);
+    setCreateError('');
     try {
-      await createProject(newName.trim());
+      await create(newName.trim());
       setNewName('');
       setDialogOpen(false);
-      await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create');
+      setCreateError(err instanceof Error ? err.message : 'Failed to create');
     } finally {
       setCreating(false);
     }
@@ -82,6 +66,7 @@ export function Projects({ onSelect }: ProjectsProps) {
                 placeholder="my-app"
               />
             </div>
+            {createError && <p className="text-sm text-red-500">{createError}</p>}
             <DialogFooter>
               <Button
                 onClick={handleCreate}
@@ -94,10 +79,12 @@ export function Projects({ onSelect }: ProjectsProps) {
         </Dialog>
       </div>
 
-      {loading && <p className="text-muted-foreground">Loading...</p>}
+      {loading && projects.length === 0 && (
+        <p className="text-muted-foreground">Loading...</p>
+      )}
       {error && <p className="text-sm text-red-500">{error}</p>}
 
-      {!loading && projects.length === 0 && (
+      {!loading && projects.length === 0 && !error && (
         <p className="text-muted-foreground">No projects yet. Create one.</p>
       )}
 

@@ -1,10 +1,5 @@
-import { useEffect, useState } from 'react';
-import {
-  listSecrets,
-  createSecret,
-  deleteSecret,
-  type Secret,
-} from '@/lib/secrets';
+import { useState } from 'react';
+import { type Secret } from '@/lib/secrets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -16,46 +11,37 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-export function SecretsTable({ environmentId }: { environmentId: string }) {
-  const [secrets, setSecrets] = useState<Secret[]>([]);
-  const [loading, setLoading] = useState(true);
+interface SecretsTableProps {
+  secrets: Secret[] | undefined; // undefined = ще не завантажено
+  onAdd: (key: string, value: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}
+
+export function SecretsTable({ secrets, onAdd, onDelete }: SecretsTableProps) {
   const [error, setError] = useState('');
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
-
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
-
-  async function load() {
-    setLoading(true);
-    setError('');
-    try {
-      setSecrets(await listSecrets(environmentId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void load();
-  }, [environmentId]);
+  const [busy, setBusy] = useState(false);
 
   async function handleAdd() {
+    setError('');
+    setBusy(true);
     try {
-      await createSecret(environmentId, newKey.trim(), newValue);
+      await onAdd(newKey.trim(), newValue);
       setNewKey('');
       setNewValue('');
-      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add');
+    } finally {
+      setBusy(false);
     }
   }
 
   async function handleDelete(id: string) {
+    setError('');
     try {
-      await deleteSecret(environmentId, id);
-      await load();
+      await onDelete(id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete');
     }
@@ -85,12 +71,12 @@ export function SecretsTable({ environmentId }: { environmentId: string }) {
           value={newValue}
           onChange={(e) => setNewValue(e.target.value)}
         />
-        <Button onClick={handleAdd} disabled={!newKey.trim() || !newValue}>
+        <Button onClick={handleAdd} disabled={busy || !newKey.trim() || !newValue}>
           Add
         </Button>
       </div>
 
-      {loading ? (
+      {secrets === undefined ? (
         <p className="text-muted-foreground">Loading...</p>
       ) : secrets.length === 0 ? (
         <p className="text-muted-foreground">No secrets yet.</p>

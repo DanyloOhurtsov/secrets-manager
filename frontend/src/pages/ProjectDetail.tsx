@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { Project, Environment } from '@/lib/projects';
-import { listEnvironments, createEnvironment } from '@/lib/secrets';
+import type { Project } from '@/lib/projects';
+import { useSecrets } from '@/lib/secrets-context';
 import { SecretsTable } from './SecretsTable';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,41 +15,58 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 
-interface ProjectDetailProps {
+export function ProjectDetail({
+  project,
+  onBack,
+}: {
   project: Project;
   onBack: () => void;
-}
+}) {
+  const {
+    getEnvironments,
+    loadEnvironments,
+    createEnvironment,
+    getSecrets,
+    loadSecrets,
+    createSecret,
+    deleteSecret,
+  } = useSecrets();
 
-export function ProjectDetail({ project, onBack }: ProjectDetailProps) {
-  const [environments, setEnvironments] = useState<Environment[]>([]);
-  const [loading, setLoading] = useState(true);
+  const environments = getEnvironments(project.id);
+  const [activeEnvId, setActiveEnvId] = useState<string | null>(null);
   const [error, setError] = useState('');
-
   const [dialogOpen, setDialogOpen] = useState(false);
   const [newEnvName, setNewEnvName] = useState('');
 
-  async function load() {
-    setLoading(true);
-    setError('');
-    try {
-      setEnvironments(await listEnvironments(project.id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // Завантажуємо оточення при першому відкритті проєкту (кеш живе глобально).
   useEffect(() => {
-    void load();
-  }, [project.id]);
+    loadEnvironments(project.id).catch((err) =>
+      setError(err instanceof Error ? err.message : 'Failed to load'),
+    );
+  }, [project.id, loadEnvironments]);
+
+  // Виставляємо активне оточення, коли список з'явився.
+  useEffect(() => {
+    if (environments && environments.length > 0 && !activeEnvId) {
+      setActiveEnvId(environments[0].id);
+    }
+  }, [environments, activeEnvId]);
+
+  // Лінива загрузка секретів активного оточення (раз).
+  useEffect(() => {
+    if (activeEnvId) {
+      loadSecrets(activeEnvId).catch((err) =>
+        setError(err instanceof Error ? err.message : 'Failed to load secrets'),
+      );
+    }
+  }, [activeEnvId, loadSecrets]);
 
   async function handleCreateEnv() {
     try {
-      await createEnvironment(project.id, newEnvName.trim());
+      const created = await createEnvironment(project.id, newEnvName.trim());
       setNewEnvName('');
       setDialogOpen(false);
-      await load();
+      setActiveEnvId(created.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create');
     }
@@ -65,9 +82,12 @@ export function ProjectDetail({ project, onBack }: ProjectDetailProps) {
       </div>
 
       {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
-      {loading && <p className="text-muted-foreground">Loading...</p>}
 
-      {!loading && environments.length === 0 && (
+      {environments === undefined && (
+        <p className="text-muted-foreground">Loading...</p>
+      )}
+
+      {environments && environments.length === 0 && (
         <div className="flex flex-col items-start gap-4">
           <p className="text-muted-foreground">No environments yet.</p>
           <CreateEnvDialog
@@ -80,8 +100,8 @@ export function ProjectDetail({ project, onBack }: ProjectDetailProps) {
         </div>
       )}
 
-      {!loading && environments.length > 0 && (
-        <Tabs defaultValue={environments[0].id}>
+      {environments && environments.length > 0 && activeEnvId && (
+        <Tabs value={activeEnvId} onValueChange={setActiveEnvId}>
           <div className="flex items-center justify-between mb-4">
             <TabsList>
               {environments.map((env) => (
@@ -100,7 +120,11 @@ export function ProjectDetail({ project, onBack }: ProjectDetailProps) {
           </div>
           {environments.map((env) => (
             <TabsContent key={env.id} value={env.id}>
-              <SecretsTable environmentId={env.id} />
+              <SecretsTable
+                secrets={getSecrets(env.id)}
+                onAdd={(key, value) => createSecret(env.id, key, value)}
+                onDelete={(id) => deleteSecret(env.id, id)}
+              />
             </TabsContent>
           ))}
         </Tabs>

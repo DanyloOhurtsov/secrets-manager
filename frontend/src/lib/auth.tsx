@@ -1,8 +1,23 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  type ReactNode,
+} from 'react';
 import { api, getToken, setToken, clearToken } from './api';
 
+export interface Identity {
+  id: string;
+  name: string;
+  type: string;
+  isSuperadmin: boolean;
+}
+
 interface AuthContextValue {
+  identity: Identity | null;
   isAuthenticated: boolean;
+  loading: boolean;
   login: (token: string) => Promise<void>;
   logout: () => void;
 }
@@ -10,29 +25,49 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(!!getToken());
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // при старті: якщо є збережений токен — спробувати відновити сесію
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+    api<Identity>('/auth/me')
+      .then((me) => setIdentity(me))
+      .catch(() => clearToken())
+      .finally(() => setLoading(false));
+  }, []);
 
   async function login(token: string) {
-    // тимчасово зберігаємо токен, щоб api() його використав
     setToken(token);
     try {
-      // перевіряємо валідність: будь-який захищений ендпоінт
-      await api('/projects');
-      setIsAuthenticated(true);
+      const me = await api<Identity>('/auth/me');
+      setIdentity(me);
     } catch (err) {
       clearToken();
-      setIsAuthenticated(false);
+      setIdentity(null);
       throw err;
     }
   }
 
   function logout() {
     clearToken();
-    setIsAuthenticated(false);
+    setIdentity(null);
   }
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, login, logout }}>
+    <AuthContext.Provider
+      value={{
+        identity,
+        isAuthenticated: !!identity,
+        loading,
+        login,
+        logout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
