@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsIn, IsOptional } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 
 export class CreateIdentityDto {
   @IsString()
@@ -20,10 +26,34 @@ export class CreateGrantDto {
   @IsNotEmpty()
   projectId: string;
 
-  @IsIn(['readonly', 'developer', 'admin'])
+  @IsIn(['viewer', 'reader', 'readonly', 'developer', 'admin'])
   role: string;
 
   @IsString()
   @IsOptional()
   environment?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  canRevealSecrets?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  canCreateSecrets?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  canUpdateSecrets?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  canDeleteSecrets?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  canRollbackSecrets?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  canManageGrants?: boolean;
 }

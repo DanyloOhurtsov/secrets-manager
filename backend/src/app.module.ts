@@ -12,6 +12,7 @@ import { ProjectsModule } from './projects/projects.module';
 import { EnvironmentsModule } from './environments/environments.module';
 import { SecretsModule } from './secrets/secrets.module';
 import { AdminModule } from './admin/admin.module';
+import { SignupModule } from './signup/signup.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { AdminModule } from './admin/admin.module';
     EnvironmentsModule,
     SecretsModule,
     AdminModule,
+    SignupModule,
   ],
   controllers: [AppController],
   providers: [

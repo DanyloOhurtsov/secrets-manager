@@ -37,7 +37,10 @@ export class CryptoService {
   private encryptWithKey(key: Buffer, plaintext: Buffer) {
     const iv = randomBytes(IV_LENGTH);
     const cipher = createCipheriv(ALGORITHM, key, iv);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const ciphertext = Buffer.concat([
+      cipher.update(plaintext),
+      cipher.final(),
+    ]);
     const authTag = cipher.getAuthTag();
     return { ciphertext, iv, authTag };
   }

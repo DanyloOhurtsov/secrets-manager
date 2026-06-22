@@ -2,18 +2,14 @@ import { Injectable } from '@nestjs/common';
 import { randomBytes, createHash } from 'node:crypto';
 import { PrismaService } from '../prisma.service';
 import { CacheService } from '../cache/cache.service';
+import { AuthPrincipal } from './auth.types';
 
 const TOKEN_PREFIX = 'sm_';
 const TOKEN_BYTES = 32;
 const CACHE_TTL_SECONDS = 30;
 
 // що кешуємо: мінімум для авторизації
-interface CachedIdentity {
-  id: string;
-  name: string;
-  type: string;
-  isSuperadmin: boolean;
-}
+type CachedIdentity = AuthPrincipal;
 
 @Injectable()
 export class TokenService {
@@ -62,8 +58,11 @@ export class TokenService {
     const identity: CachedIdentity = {
       id: record.identity.id,
       name: record.identity.name,
+      email: record.identity.email,
       type: record.identity.type,
       isSuperadmin: record.identity.isSuperadmin,
+      serviceOrganizationId: record.identity.serviceOrganizationId,
+      authMethod: 'token',
     };
 
     // 3. Кладемо в кеш із коротким TTL (страховка на випадок збою інвалідації)

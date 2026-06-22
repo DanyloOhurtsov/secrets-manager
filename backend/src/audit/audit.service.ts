@@ -7,6 +7,9 @@ interface AuditEntry {
   action: string;
   targetType: string;
   targetId: string;
+  organizationId?: string | null;
+  projectId?: string | null;
+  environmentId?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -25,10 +28,21 @@ export class AuditService {
         select: { name: true },
       });
 
+      const organization = entry.organizationId
+        ? await this.prisma.organization.findUnique({
+            where: { id: entry.organizationId },
+            select: { name: true },
+          })
+        : null;
+
       await this.prisma.auditLog.create({
         data: {
           actorId: entry.actorId,
           actorName: actor?.name ?? 'unknown',
+          organizationId: entry.organizationId ?? null,
+          organizationName: organization?.name ?? null,
+          projectId: entry.projectId ?? null,
+          environmentId: entry.environmentId ?? null,
           action: entry.action,
           targetType: entry.targetType,
           targetId: entry.targetId,

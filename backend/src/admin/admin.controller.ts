@@ -6,6 +6,7 @@ import {
   Body,
   Param,
   UseGuards,
+  Query,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { RotationService } from './rotation.service';
@@ -68,6 +69,14 @@ export class AdminController {
       body.projectId,
       body.role,
       body.environment,
+      {
+        canRevealSecrets: body.canRevealSecrets,
+        canCreateSecrets: body.canCreateSecrets,
+        canUpdateSecrets: body.canUpdateSecrets,
+        canDeleteSecrets: body.canDeleteSecrets,
+        canRollbackSecrets: body.canRollbackSecrets,
+        canManageGrants: body.canManageGrants,
+      },
     );
   }
 
@@ -86,8 +95,18 @@ export class AdminController {
 
   // --- Audit ---
   @Get('audit')
-  listAuditLog() {
-    return this.admin.listAuditLog();
+  listAuditLog(
+    @Query('action') action?: string,
+    @Query('organizationId') organizationId?: string,
+    @Query('projectId') projectId?: string,
+    @Query('environmentId') environmentId?: string,
+  ) {
+    return this.admin.listAuditLog(100, {
+      action,
+      organizationId,
+      projectId,
+      environmentId,
+    });
   }
 
   // --- Key rotation ---

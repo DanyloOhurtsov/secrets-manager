@@ -16,7 +16,9 @@ async function main() {
 
   if (existing) {
     console.log('\n=== BOOTSTRAP SKIPPED ===');
-    console.log(`A superadmin already exists: ${existing.name} (${existing.id})`);
+    console.log(
+      `A superadmin already exists: ${existing.name} (${existing.id})`,
+    );
     console.log('To issue a new token, use the admin API:');
     console.log(`  POST /admin/identities/${existing.id}/tokens`);
     console.log('Or reset the database to start fresh.');

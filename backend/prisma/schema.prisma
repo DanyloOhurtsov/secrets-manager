@@ -8,12 +8,18 @@ datasource db {
 }
 
 model Project {
-  id        String   @id @default(uuid())
-  name      String   @unique
-  createdAt DateTime @default(now())
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  createdById    String?
+  createdAt      DateTime @default(now())
 
+  organization Organization  @relation(fields: [organizationId], references: [id])
   environments Environment[]
   grants       Grant[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
 }
 
 model Environment {
@@ -26,14 +32,33 @@ model Environment {
   secrets Secret[]
 
   @@unique([projectId, name])
+  @@index([projectId])
 }
 
 model Secret {
-  id            String   @id @default(uuid())
-  key           String
-  environmentId String
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id               String   @id @default(uuid())
+  key              String
+  environmentId    String
+  currentVersionId String?  @unique
+  createdById      String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  environment    Environment     @relation(fields: [environmentId], references: [id])
+  currentVersion SecretVersion?  @relation("CurrentSecretVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  versions       SecretVersion[] @relation("SecretVersions")
+
+  @@unique([environmentId, key])
+  @@index([environmentId])
+}
+
+model SecretVersion {
+  id          String   @id @default(uuid())
+  secretId    String
+  version     Int
+  createdById String?
+  createdAt   DateTime @default(now())
+  note        String?
 
   ciphertext       Bytes
   valueIv          Bytes
@@ -43,20 +68,57 @@ model Secret {
   dataKeyAuthTag   Bytes
   keyVersion       String
 
-  environment Environment @relation(fields: [environmentId], references: [id])
+  secret     Secret  @relation("SecretVersions", fields: [secretId], references: [id], onDelete: Cascade)
+  currentFor Secret? @relation("CurrentSecretVersion")
 
-  @@unique([environmentId, key])
+  @@unique([secretId, version])
+  @@index([secretId])
 }
 
 model Identity {
-  id           String   @id @default(uuid())
-  name         String
-  type         String // "human" | "service"
-  isSuperadmin Boolean  @default(false)
-  createdAt    DateTime @default(now())
+  id                    String   @id @default(uuid())
+  name                  String
+  email                 String?  @unique
+  passwordHash          String?
+  type                  String // "human" | "service"
+  isSuperadmin          Boolean  @default(false)
+  serviceOrganizationId String?
+  createdAt             DateTime @default(now())
 
-  tokens Token[]
-  grants Grant[]
+  tokens              Token[]
+  sessions            Session[]
+  grants              Grant[]
+  memberships         OrganizationMembership[]
+  serviceOrganization Organization?            @relation("OrganizationServiceAccounts", fields: [serviceOrganizationId], references: [id])
+
+  @@index([serviceOrganizationId])
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  type      String // "personal" | "team"
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+
+  memberships     OrganizationMembership[]
+  projects        Project[]
+  serviceAccounts Identity[]               @relation("OrganizationServiceAccounts")
+}
+
+model OrganizationMembership {
+  id             String   @id @default(uuid())
+  organizationId String
+  identityId     String
+  role           String // "owner" | "admin" | "member"
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  identity     Identity     @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, identityId])
+  @@index([identityId])
 }
 
 model Token {
@@ -69,29 +131,61 @@ model Token {
   revokedAt  DateTime?
 
   identity Identity @relation(fields: [identityId], references: [id])
+
+  @@index([identityId])
+}
+
+model Session {
+  id          String    @id @default(uuid())
+  identityId  String
+  sessionHash String    @unique
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+
+  identity Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  @@index([identityId])
 }
 
 model Grant {
-  id          String   @id @default(uuid())
-  identityId  String
-  projectId   String
-  environment String?
-  role        String // "admin" | "developer" | "readonly"
-  createdAt   DateTime @default(now())
+  id                 String   @id @default(uuid())
+  identityId         String
+  projectId          String
+  scopeType          String // "project" | "environment"
+  scopeId            String
+  role               String // "viewer" | "reader" | "developer" | "admin"
+  canRevealSecrets   Boolean  @default(false)
+  canCreateSecrets   Boolean  @default(false)
+  canUpdateSecrets   Boolean  @default(false)
+  canDeleteSecrets   Boolean  @default(false)
+  canRollbackSecrets Boolean  @default(false)
+  canManageGrants    Boolean  @default(false)
+  createdAt          DateTime @default(now())
 
   identity Identity @relation(fields: [identityId], references: [id])
   project  Project  @relation(fields: [projectId], references: [id])
 
-  @@unique([identityId, projectId, environment])
+  @@unique([identityId, scopeType, scopeId])
+  @@index([projectId])
 }
 
 model AuditLog {
-  id         String   @id @default(uuid())
-  actorId    String
-  actorName  String
-  action     String
-  targetType String
-  targetId   String
-  metadata   Json?
-  createdAt  DateTime @default(now())
+  id               String   @id @default(uuid())
+  actorId          String
+  actorName        String
+  organizationId   String?
+  organizationName String?
+  projectId        String?
+  environmentId    String?
+  action           String
+  targetType       String
+  targetId         String
+  metadata         Json?
+  createdAt        DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([projectId])
+  @@index([environmentId])
+  @@index([action])
 }

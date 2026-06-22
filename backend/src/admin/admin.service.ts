@@ -1,7 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { TokenService } from '../auth/token.service';
 import { AuditService } from '../audit/audit.service';
+import { AuthorizationService } from '../auth/authorization.service';
+import { AuthPrincipal } from '../auth/auth.types';
 
 @Injectable()
 export class AdminService {
@@ -9,6 +16,7 @@ export class AdminService {
     private prisma: PrismaService,
     private tokenService: TokenService,
     private audit: AuditService,
+    private authz: AuthorizationService,
   ) {}
 
   // --- Identity ---
@@ -18,8 +26,10 @@ export class AdminService {
       select: {
         id: true,
         name: true,
+        email: true,
         type: true,
         isSuperadmin: true,
+        serviceOrganizationId: true,
         createdAt: true,
       },
     });
@@ -40,8 +50,10 @@ export class AdminService {
       select: {
         id: true,
         name: true,
+        email: true,
         type: true,
         isSuperadmin: true,
+        serviceOrganizationId: true,
         createdAt: true,
       },
     });
@@ -106,6 +118,14 @@ export class AdminService {
     projectId: string,
     role: string,
     environment?: string,
+    capabilities?: {
+      canRevealSecrets?: boolean;
+      canCreateSecrets?: boolean;
+      canUpdateSecrets?: boolean;
+      canDeleteSecrets?: boolean;
+      canRollbackSecrets?: boolean;
+      canManageGrants?: boolean;
+    },
   ) {
     const identity = await this.prisma.identity.findUnique({
       where: { id: identityId },
@@ -117,20 +137,51 @@ export class AdminService {
     });
     if (!project) throw new NotFoundException('Project not found');
 
+    const env = environment
+      ? await this.prisma.environment.findFirst({
+          where: {
+            projectId,
+            OR: [{ id: environment }, { name: environment }],
+          },
+        })
+      : null;
+
+    if (environment && !env)
+      throw new NotFoundException('Environment not found');
+
+    const normalizedRole = role === 'readonly' ? 'reader' : role;
+    const isAdmin = normalizedRole === 'admin';
+
     const grant = await this.prisma.grant.create({
-      data: { identityId, projectId, role, environment: environment ?? null },
+      data: {
+        identityId,
+        projectId,
+        scopeType: env ? 'environment' : 'project',
+        scopeId: env?.id ?? projectId,
+        role: normalizedRole,
+        canRevealSecrets: capabilities?.canRevealSecrets ?? isAdmin,
+        canCreateSecrets: capabilities?.canCreateSecrets ?? isAdmin,
+        canUpdateSecrets: capabilities?.canUpdateSecrets ?? isAdmin,
+        canDeleteSecrets: capabilities?.canDeleteSecrets ?? isAdmin,
+        canRollbackSecrets: capabilities?.canRollbackSecrets ?? isAdmin,
+        canManageGrants: capabilities?.canManageGrants ?? isAdmin,
+      },
     });
 
     await this.audit.log({
       actorId,
+      organizationId: project.organizationId,
+      projectId,
+      environmentId: env?.id ?? null,
       action: 'grant.create',
       targetType: 'grant',
       targetId: grant.id,
       metadata: {
         identityId,
         projectId,
-        role,
-        environment: environment ?? null,
+        role: normalizedRole,
+        scopeType: grant.scopeType,
+        scopeId: grant.scopeId,
       },
     });
 
@@ -149,7 +200,13 @@ export class AdminService {
       action: 'grant.revoke',
       targetType: 'grant',
       targetId: grantId,
-      metadata: { identityId: grant.identityId, projectId: grant.projectId },
+      projectId: grant.projectId,
+      metadata: {
+        identityId: grant.identityId,
+        projectId: grant.projectId,
+        scopeType: grant.scopeType,
+        scopeId: grant.scopeId,
+      },
     });
 
     return { revoked: true };
@@ -160,8 +217,125 @@ export class AdminService {
   }
 
   // --- Audit ---
-  listAuditLog(limit = 100) {
+  listAuditLog(
+    limit = 100,
+    filters?: {
+      action?: string;
+      organizationId?: string;
+      projectId?: string;
+      environmentId?: string;
+    },
+  ) {
     return this.prisma.auditLog.findMany({
+      where: {
+        action: filters?.action,
+        organizationId: filters?.organizationId,
+        projectId: filters?.projectId,
+        environmentId: filters?.environmentId,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+  }
+
+  async listAuditForActor(
+    actor: AuthPrincipal,
+    filters?: {
+      action?: string;
+      organizationId?: string;
+      projectId?: string;
+      environmentId?: string;
+    },
+    limit = 100,
+  ) {
+    if (actor.isSuperadmin) {
+      return this.listAuditLog(limit, filters);
+    }
+
+    const where: Prisma.AuditLogWhereInput = {
+      action: filters?.action,
+    };
+
+    if (filters?.environmentId) {
+      const environment = await this.prisma.environment.findUnique({
+        where: { id: filters.environmentId },
+        select: { id: true, projectId: true },
+      });
+      if (!environment) throw new NotFoundException('Environment not found');
+      await this.authz.checkProjectAccess(
+        actor,
+        environment.projectId,
+        'manageProject',
+        environment.id,
+      );
+      where.environmentId = environment.id;
+      where.projectId = environment.projectId;
+      return this.prisma.auditLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+    }
+
+    if (filters?.projectId) {
+      await this.authz.checkProjectAccess(
+        actor,
+        filters.projectId,
+        'manageProject',
+      );
+      where.projectId = filters.projectId;
+      return this.prisma.auditLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+    }
+
+    if (filters?.organizationId) {
+      await this.authz.assertOrganizationAdmin(
+        actor.id,
+        filters.organizationId,
+      );
+      where.organizationId = filters.organizationId;
+      return this.prisma.auditLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+    }
+
+    const adminMemberships = await this.prisma.organizationMembership.findMany({
+      where: {
+        identityId: actor.id,
+        role: { in: ['owner', 'admin'] },
+      },
+      select: { organizationId: true },
+    });
+    const adminGrants = await this.prisma.grant.findMany({
+      where: {
+        identityId: actor.id,
+        OR: [{ role: 'admin' }, { canManageGrants: true }],
+      },
+      select: { projectId: true },
+    });
+
+    const organizationIds = adminMemberships.map((m) => m.organizationId);
+    const projectIds = [...new Set(adminGrants.map((g) => g.projectId))];
+
+    if (organizationIds.length === 0 && projectIds.length === 0) {
+      throw new ForbiddenException('Audit access required');
+    }
+
+    return this.prisma.auditLog.findMany({
+      where: {
+        ...where,
+        OR: [
+          ...(organizationIds.length > 0
+            ? [{ organizationId: { in: organizationIds } }]
+            : []),
+          ...(projectIds.length > 0 ? [{ projectId: { in: projectIds } }] : []),
+        ],
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
