@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import { listAuditLog, type AuditEntry } from '@/lib/admin';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import {
   Table,
   TableBody,
@@ -12,6 +12,39 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+
+const auditActionGroups = [
+  {
+    label: 'Auth',
+    actions: ['auth.signup', 'auth.login'],
+  },
+  {
+    label: 'Projects',
+    actions: ['project.create', 'project.delete'],
+  },
+  {
+    label: 'Environments',
+    actions: ['environment.create', 'environment.delete'],
+  },
+  {
+    label: 'Secrets',
+    actions: ['secret.create', 'secret.list', 'secret.reveal', 'secret.delete'],
+  },
+  {
+    label: 'Access',
+    actions: [
+      'identity.create',
+      'token.issue',
+      'token.revoke',
+      'grant.create',
+      'grant.revoke',
+    ],
+  },
+  {
+    label: 'System',
+    actions: ['key_rotation.complete'],
+  },
+];
 
 function actionStyle(action: string): {
   variant: 'default' | 'secondary' | 'destructive';
@@ -33,10 +66,10 @@ export function AuditLog() {
   const [error, setError] = useState('');
   const [action, setAction] = useState('');
 
-  async function load() {
+  async function load(selectedAction = action) {
     setLoading(true);
     setError('');
-    listAuditLog({ action: action.trim() || undefined })
+    listAuditLog({ action: selectedAction || undefined })
       .then(setEntries)
       .catch((err) =>
         setError(err instanceof Error ? err.message : 'Failed to load'),
@@ -45,39 +78,40 @@ export function AuditLog() {
   }
 
   useEffect(() => {
-    void load();
+    void load(action);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [action]);
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <div className="flex flex-col gap-2 sm:w-80">
           <Label htmlFor="audit-action">Event</Label>
-          <Input
+          <Select
             id="audit-action"
-            placeholder="secret.create / auth.signup / ..."
             value={action}
             onChange={(e) => setAction(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && void load()}
-          />
+            disabled={loading}
+          >
+            <option value="">All events</option>
+            {auditActionGroups.map((group) => (
+              <optgroup key={group.label} label={group.label}>
+                {group.actions.map((eventAction) => (
+                  <option key={eventAction} value={eventAction}>
+                    {eventAction}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </Select>
         </div>
         <Button onClick={() => void load()} disabled={loading}>
-          Filter
+          Refresh
         </Button>
         <Button
           variant="outline"
-          onClick={() => {
-            setAction('');
-            setLoading(true);
-            listAuditLog()
-              .then(setEntries)
-              .catch((err) =>
-                setError(err instanceof Error ? err.message : 'Failed to load'),
-              )
-              .finally(() => setLoading(false));
-          }}
-          disabled={loading}
+          onClick={() => setAction('')}
+          disabled={loading || action === ''}
         >
           Clear
         </Button>
