@@ -50,8 +50,8 @@ $ npm run start:prod
 # unit tests
 $ npm run test
 
-# e2e tests
-$ npm run test:e2e
+# e2e tests require a disposable database; they refuse to run without it
+$ TEST_DATABASE_URL="postgresql://.../secrets_manager_test" npm run test:e2e
 
 # test coverage
 $ npm run test:cov

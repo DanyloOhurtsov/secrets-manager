@@ -10,6 +10,22 @@ describe('AppController (e2e)', () => {
   let prisma: PrismaService;
 
   beforeAll(async () => {
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error(
+        'Refusing to run e2e tests without TEST_DATABASE_URL. These tests clean the database.',
+      );
+    }
+
+    const databaseName = new URL(testDatabaseUrl).pathname.replace(/^\//, '');
+    if (!databaseName.includes('test')) {
+      throw new Error(
+        `Refusing to run e2e tests against non-test database "${databaseName}".`,
+      );
+    }
+
+    process.env.DATABASE_URL = testDatabaseUrl;
+
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -73,6 +89,15 @@ describe('AppController (e2e)', () => {
     const bobIdentityId = secondSignup.body.identity.id as string;
     expect(aliceSession).toMatch(/^sess_/);
     expect(bobSession).toMatch(/^sess_/);
+
+    const aliceLogin = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({
+        email: 'alice@example.com',
+        password: 'password-123',
+      })
+      .expect(201);
+    expect(aliceLogin.body.sessionToken).toMatch(/^sess_/);
 
     const projectRes = await request(app.getHttpServer())
       .post('/projects')
