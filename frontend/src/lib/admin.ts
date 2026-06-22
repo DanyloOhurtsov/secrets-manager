@@ -29,6 +29,10 @@ export interface AuditEntry {
   id: string;
   actorId: string;
   actorName: string;
+  organizationId: string | null;
+  organizationName: string | null;
+  projectId: string | null;
+  environmentId: string | null;
   action: string;
   targetType: string;
   targetId: string;
@@ -86,6 +90,19 @@ export function revokeGrant(grantId: string) {
 }
 
 // --- Audit ---
-export function listAuditLog() {
-  return api<AuditEntry[]>('/admin/audit');
+export interface AuditFilters {
+  action?: string;
+  organizationId?: string;
+  projectId?: string;
+  environmentId?: string;
+}
+
+export function listAuditLog(filters: AuditFilters = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) params.set(key, value);
+  }
+
+  const query = params.toString();
+  return api<AuditEntry[]>(`/audit${query ? `?${query}` : ''}`);
 }

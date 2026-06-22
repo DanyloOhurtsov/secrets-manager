@@ -5,14 +5,23 @@ import { Signup } from '@/pages/Signup';
 import { Projects } from '@/pages/Projects';
 import { ProjectDetail } from '@/pages/ProjectDetail';
 import { Admin } from '@/pages/Admin';
+import { AuditLog } from '@/pages/AuditLog';
 import { Button } from '@/components/ui/button';
 import type { Project } from '@/lib/projects';
 
-type View = { name: 'projects' } | { name: 'project'; project: Project } | { name: 'admin' };
+type View =
+  | { name: 'projects' }
+  | { name: 'project'; project: Project }
+  | { name: 'admin' }
+  | { name: 'audit' };
 
 function App() {
   const { identity, isAuthenticated, loading, logout } = useAuth();
-  const [view, setView] = useState<View>({ name: 'projects' });
+  const [view, setView] = useState<View>(
+    window.location.pathname === '/audit'
+      ? { name: 'audit' }
+      : { name: 'projects' },
+  );
   const [authView, setAuthView] = useState<'login' | 'signup'>(
     window.location.pathname === '/signup' ? 'signup' : 'login',
   );
@@ -48,11 +57,25 @@ function App() {
       <div className="flex items-center justify-between mb-8">
         <button
           className="text-2xl font-bold"
-          onClick={() => setView({ name: 'projects' })}
+          onClick={() => {
+            window.history.pushState(null, '', '/');
+            setView({ name: 'projects' });
+          }}
         >
           Secrets Manager
         </button>
         <div className="flex items-center gap-4">
+          {view.name !== 'audit' && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                window.history.pushState(null, '', '/audit');
+                setView({ name: 'audit' });
+              }}
+            >
+              Audit
+            </Button>
+          )}
           {identity?.isSuperadmin && view.name !== 'admin' && (
             <Button variant="outline" onClick={() => setView({ name: 'admin' })}>
               Access
@@ -79,6 +102,23 @@ function App() {
       )}
       {view.name === 'admin' && (
         <Admin onBack={() => setView({ name: 'projects' })} />
+      )}
+      {view.name === 'audit' && (
+        <div>
+          <div className="flex items-center gap-3 mb-6">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                window.history.pushState(null, '', '/');
+                setView({ name: 'projects' });
+              }}
+            >
+              ← Back
+            </Button>
+            <h2 className="text-xl font-semibold">Audit Log</h2>
+          </div>
+          <AuditLog />
+        </div>
       )}
     </div>
   );
