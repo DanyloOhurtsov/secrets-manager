@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '@/lib/auth';
 import { Login } from '@/pages/Login';
+import { Signup } from '@/pages/Signup';
 import { Projects } from '@/pages/Projects';
 import { ProjectDetail } from '@/pages/ProjectDetail';
 import { Admin } from '@/pages/Admin';
@@ -12,6 +13,19 @@ type View = { name: 'projects' } | { name: 'project'; project: Project } | { nam
 function App() {
   const { identity, isAuthenticated, loading, logout } = useAuth();
   const [view, setView] = useState<View>({ name: 'projects' });
+  const [authView, setAuthView] = useState<'login' | 'signup'>(
+    window.location.pathname === '/signup' ? 'signup' : 'login',
+  );
+
+  function showLogin() {
+    window.history.pushState(null, '', '/');
+    setAuthView('login');
+  }
+
+  function showSignup() {
+    window.history.pushState(null, '', '/signup');
+    setAuthView('signup');
+  }
 
   if (loading) {
     return (
@@ -22,7 +36,11 @@ function App() {
   }
 
   if (!isAuthenticated) {
-    return <Login />;
+    return authView === 'signup' ? (
+      <Signup onLogin={showLogin} />
+    ) : (
+      <Login onSignup={showSignup} />
+    );
   }
 
   return (
