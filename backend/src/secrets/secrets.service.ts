@@ -119,7 +119,7 @@ export class SecretsService {
         },
       });
 
-      return tx.secret.update({
+      const updated = await tx.secret.update({
         where: { id: base.id },
         data: { currentVersionId: version.id, deletedAt: null },
         select: {
@@ -130,17 +130,23 @@ export class SecretsService {
           createdAt: true,
         },
       });
-    });
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: env.project.organizationId,
-      projectId: env.projectId,
-      environmentId,
-      action: 'secret.create',
-      targetType: 'secret',
-      targetId: secret.id,
-      metadata: { key, revived: !!existing },
+      // Аудит — у ТІЙ САМІЙ транзакції: збій журналу відкочує секрет і версію.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: env.project.organizationId,
+          projectId: env.projectId,
+          environmentId,
+          action: 'secret.create',
+          targetType: 'secret',
+          targetId: updated.id,
+          metadata: { key, revived: !!existing },
+        },
+        tx,
+      );
+
+      return updated;
     });
 
     return secret;
@@ -166,7 +172,7 @@ export class SecretsService {
           ...enc,
         },
       });
-      return tx.secret.update({
+      const updated = await tx.secret.update({
         where: { id: secret.id },
         data: { currentVersionId: version.id },
         select: {
@@ -177,17 +183,23 @@ export class SecretsService {
           updatedAt: true,
         },
       });
-    });
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: secret.environment.project.organizationId,
-      projectId: secret.environment.projectId,
-      environmentId: secret.environmentId,
-      action: 'secret.version.create',
-      targetType: 'secret',
-      targetId: secret.id,
-      metadata: { key: secret.key },
+      // Аудит у тій самій транзакції: збій журналу відкочує нову версію.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: secret.environment.project.organizationId,
+          projectId: secret.environment.projectId,
+          environmentId: secret.environmentId,
+          action: 'secret.version.create', // секрет оновлено — критична мутація
+          targetType: 'secret',
+          targetId: secret.id,
+          metadata: { key: secret.key },
+        },
+        tx,
+      );
+
+      return updated;
     });
 
     return result;
@@ -252,7 +264,7 @@ export class SecretsService {
           keyVersion: target.keyVersion,
         },
       });
-      return tx.secret.update({
+      const updated = await tx.secret.update({
         where: { id: secret.id },
         data: { currentVersionId: version.id },
         select: {
@@ -263,17 +275,23 @@ export class SecretsService {
           updatedAt: true,
         },
       });
-    });
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: secret.environment.project.organizationId,
-      projectId: secret.environment.projectId,
-      environmentId: secret.environmentId,
-      action: 'secret.rollback',
-      targetType: 'secret',
-      targetId: secret.id,
-      metadata: { key: secret.key, fromVersion: toVersion },
+      // Аудит у тій самій транзакції: збій журналу відкочує rollback.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: secret.environment.project.organizationId,
+          projectId: secret.environment.projectId,
+          environmentId: secret.environmentId,
+          action: 'secret.rollback',
+          targetType: 'secret',
+          targetId: secret.id,
+          metadata: { key: secret.key, fromVersion: toVersion },
+        },
+        tx,
+      );
+
+      return updated;
     });
 
     return result;
@@ -301,7 +319,9 @@ export class SecretsService {
     // (CLI / bulk-pull). Звичайне відкриття сторінки — це secret.list, не reveal.
     const revealValues = reveal && canReveal;
 
-    await this.audit.log({
+    // secret.list — read-only метадані (ключі без значень): best-effort, не
+    // валимо звичайний перегляд сторінки через збій журналу.
+    await this.audit.logBestEffort({
       actorId: actor.id,
       organizationId: env.project.organizationId,
       projectId: env.projectId,
@@ -312,8 +332,11 @@ export class SecretsService {
       metadata: { count: secrets.length, revealed: revealValues },
     });
 
+    // secret.reveal — критично: пишемо журнал ПЕРЕД розшифруванням значень нижче.
+    // Якщо logRequired кине 503, мапа з decrypt() не виконається — плейнтекст не
+    // покине сервер.
     if (revealValues) {
-      await this.audit.log({
+      await this.audit.logRequired({
         actorId: actor.id,
         organizationId: env.project.organizationId,
         projectId: env.projectId,
@@ -369,17 +392,9 @@ export class SecretsService {
 
     if (!secret.currentVersion) return { id: secret.id, value: null };
 
-    const value = this.crypto.decrypt({
-      ciphertext: secret.currentVersion.ciphertext,
-      valueIv: secret.currentVersion.valueIv,
-      valueAuthTag: secret.currentVersion.valueAuthTag,
-      encryptedDataKey: secret.currentVersion.encryptedDataKey,
-      dataKeyIv: secret.currentVersion.dataKeyIv,
-      dataKeyAuthTag: secret.currentVersion.dataKeyAuthTag,
-      keyVersion: secret.currentVersion.keyVersion,
-    });
-
-    await this.audit.log({
+    // Спершу — обов'язковий запис у журнал, і ЛИШЕ потім розшифрування. Якщо
+    // аудит впав (503), плейнтекст не розшифровується й не повертається.
+    await this.audit.logRequired({
       actorId: actor.id,
       organizationId: secret.environment.project.organizationId,
       projectId: secret.environment.projectId,
@@ -388,6 +403,16 @@ export class SecretsService {
       targetType: 'secret',
       targetId: secret.id,
       metadata: { key: secret.key, version: secret.currentVersion.version },
+    });
+
+    const value = this.crypto.decrypt({
+      ciphertext: secret.currentVersion.ciphertext,
+      valueIv: secret.currentVersion.valueIv,
+      valueAuthTag: secret.currentVersion.valueAuthTag,
+      encryptedDataKey: secret.currentVersion.encryptedDataKey,
+      dataKeyIv: secret.currentVersion.dataKeyIv,
+      dataKeyAuthTag: secret.currentVersion.dataKeyAuthTag,
+      keyVersion: secret.currentVersion.keyVersion,
     });
 
     return { id: secret.id, value };
@@ -403,21 +428,25 @@ export class SecretsService {
       secret.environmentId,
     );
 
-    // М'яке видалення: лишаємо версії, звільняємо "поточну" версію.
-    await this.prisma.secret.update({
-      where: { id },
-      data: { deletedAt: new Date(), currentVersionId: null },
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: secret.environment.project.organizationId,
-      projectId: secret.environment.projectId,
-      environmentId: secret.environmentId,
-      action: 'secret.delete',
-      targetType: 'secret',
-      targetId: id,
-      metadata: { key: secret.key },
+    // М'яке видалення + аудит атомарно: збій журналу відкочує видалення.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.secret.update({
+        where: { id },
+        data: { deletedAt: new Date(), currentVersionId: null },
+      });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: secret.environment.project.organizationId,
+          projectId: secret.environment.projectId,
+          environmentId: secret.environmentId,
+          action: 'secret.delete',
+          targetType: 'secret',
+          targetId: id,
+          metadata: { key: secret.key },
+        },
+        tx,
+      );
     });
 
     return { deleted: true };

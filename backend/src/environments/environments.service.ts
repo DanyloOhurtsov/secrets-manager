@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Environment, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { AuthPrincipal } from '../auth/auth.types';
 import { AuthorizationService } from '../auth/authorization.service';
@@ -24,19 +24,25 @@ export class EnvironmentsService {
     if (!project) throw new NotFoundException('Project not found');
     await this.authz.checkProjectAccess(actor, projectId, 'manageProject');
 
-    const environment = await this.prisma.environment.create({
-      data: { name, projectId },
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: project.organizationId,
-      projectId,
-      environmentId: environment.id,
-      action: 'environment.create',
-      targetType: 'environment',
-      targetId: environment.id,
-      metadata: { name },
+    // Створення + аудит атомарно: збій журналу відкочує створення оточення.
+    const environment = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.environment.create({
+        data: { name, projectId },
+      });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: project.organizationId,
+          projectId,
+          environmentId: created.id,
+          action: 'environment.create',
+          targetType: 'environment',
+          targetId: created.id,
+          metadata: { name },
+        },
+        tx,
+      );
+      return created;
     });
 
     return environment;
@@ -66,31 +72,41 @@ export class EnvironmentsService {
     if (!env) throw new NotFoundException('Environment not found');
     await this.authz.checkProjectAccess(actor, env.projectId, 'manageProject');
 
-    const updated = await this.prisma.environment
-      .update({ where: { id }, data: { name } })
-      .catch((err) => {
-        // Унікальність [projectId, name] — інше оточення вже має цю назву.
-        if (
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          err.code === 'P2002'
-        ) {
-          throw new ConflictException(
-            'An environment with this name already exists in the project',
-          );
-        }
-        throw err;
+    // Перейменування + аудит атомарно: збій журналу відкочує зміну назви.
+    let updated: Environment;
+    try {
+      updated = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.environment.update({
+          where: { id },
+          data: { name },
+        });
+        await this.audit.logRequired(
+          {
+            actorId: actor.id,
+            organizationId: env.project.organizationId,
+            projectId: env.projectId,
+            environmentId: id,
+            action: 'environment.update',
+            targetType: 'environment',
+            targetId: id,
+            metadata: { from: env.name, to: name },
+          },
+          tx,
+        );
+        return result;
       });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: env.project.organizationId,
-      projectId: env.projectId,
-      environmentId: id,
-      action: 'environment.update',
-      targetType: 'environment',
-      targetId: id,
-      metadata: { from: env.name, to: name },
-    });
+    } catch (err) {
+      // Унікальність [projectId, name] — інше оточення вже має цю назву.
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'An environment with this name already exists in the project',
+        );
+      }
+      throw err;
+    }
 
     return updated;
   }
@@ -103,17 +119,25 @@ export class EnvironmentsService {
     if (!env) throw new NotFoundException('Environment not found');
     await this.authz.checkProjectAccess(actor, env.projectId, 'manageProject');
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: env.project.organizationId,
-      projectId: env.projectId,
-      environmentId: id,
-      action: 'environment.delete',
-      targetType: 'environment',
-      targetId: id,
-      metadata: { name: env.name },
+    // Видалення + аудит атомарно: збій журналу відкочує видалення оточення.
+    const deleted = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.environment.delete({ where: { id } });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: env.project.organizationId,
+          projectId: env.projectId,
+          environmentId: id,
+          action: 'environment.delete',
+          targetType: 'environment',
+          targetId: id,
+          metadata: { name: env.name },
+        },
+        tx,
+      );
+      return result;
     });
 
-    return this.prisma.environment.delete({ where: { id } });
+    return deleted;
   }
 }

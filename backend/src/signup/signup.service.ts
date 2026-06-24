@@ -70,7 +70,7 @@ export class SignupService {
 
     const sessionToken = await this.sessions.issue(identity.id);
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId: identity.id,
       organizationId: organization.id,
       action: 'auth.signup',
@@ -80,7 +80,7 @@ export class SignupService {
     });
 
     // Кожне створення організації має слід в audit — включно з personal workspace.
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId: identity.id,
       organizationId: organization.id,
       action: 'organization.create',

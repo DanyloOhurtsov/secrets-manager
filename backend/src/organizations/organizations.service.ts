@@ -71,7 +71,7 @@ export class OrganizationsService {
       return created;
     });
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId: actor.id,
       organizationId: org.id,
       action: 'organization.create',
@@ -136,7 +136,7 @@ export class OrganizationsService {
       data: { name },
     });
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId: actor.id,
       organizationId: id,
       action: 'organization.update',
@@ -172,15 +172,22 @@ export class OrganizationsService {
       );
     }
 
-    await this.prisma.organization.delete({ where: { id } });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: id,
-      action: 'organization.delete',
-      targetType: 'organization',
-      targetId: id,
-      metadata: { name: org.name },
+    // Видалення org + аудит атомарно: збій журналу відкочує видалення
+    // (transaction-level fail-closed). Аудит пишемо ПЕРЕД delete — інакше
+    // write() не знайде org і втратить її ім'я у записі журналу.
+    await this.prisma.$transaction(async (tx) => {
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: id,
+          action: 'organization.delete',
+          targetType: 'organization',
+          targetId: id,
+          metadata: { name: org.name },
+        },
+        tx,
+      );
+      await tx.organization.delete({ where: { id } });
     });
 
     return { deleted: true };
@@ -243,17 +250,23 @@ export class OrganizationsService {
       }
     }
 
-    const membership = await this.prisma.organizationMembership.create({
-      data: { organizationId: orgId, identityId: identity.id, role },
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'membership.invite',
-      targetType: 'identity',
-      targetId: identity.id,
-      metadata: { email: normalizedEmail, role },
+    // Створення членства + аудит атомарно: збій журналу відкочує запрошення.
+    const membership = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.organizationMembership.create({
+        data: { organizationId: orgId, identityId: identity.id, role },
+      });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'membership.invite',
+          targetType: 'identity',
+          targetId: identity.id,
+          metadata: { email: normalizedEmail, role },
+        },
+        tx,
+      );
+      return created;
     });
 
     return {
@@ -304,18 +317,24 @@ export class OrganizationsService {
       );
     }
 
-    const updated = await this.prisma.organizationMembership.update({
-      where: { id: membership.id },
-      data: { role: newRole },
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'membership.role_change',
-      targetType: 'identity',
-      targetId: targetIdentityId,
-      metadata: { from: membership.role, to: newRole },
+    // Зміна ролі + аудит атомарно: збій журналу відкочує зміну ролі.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.organizationMembership.update({
+        where: { id: membership.id },
+        data: { role: newRole },
+      });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'membership.role_change',
+          targetType: 'identity',
+          targetId: targetIdentityId,
+          metadata: { from: membership.role, to: newRole },
+        },
+        tx,
+      );
+      return result;
     });
 
     return { identityId: targetIdentityId, role: updated.role };
@@ -358,7 +377,8 @@ export class OrganizationsService {
     }
 
     // Прибираючи учасника, відкликаємо його гранти на проєкти цієї org —
-    // інакше доступ до секретів "переживе" членство.
+    // інакше доступ до секретів "переживе" членство. Аудит — у тій самій
+    // транзакції: збій журналу відкочує і видалення членства, і зняття грантів.
     await this.prisma.$transaction(async (tx) => {
       await tx.organizationMembership.delete({ where: { id: membership.id } });
       const projects = await tx.project.findMany({
@@ -374,15 +394,17 @@ export class OrganizationsService {
           },
         });
       }
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'membership.remove',
-      targetType: 'identity',
-      targetId: targetIdentityId,
-      metadata: { role: membership.role, self: isSelf },
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'membership.remove',
+          targetType: 'identity',
+          targetId: targetIdentityId,
+          metadata: { role: membership.role, self: isSelf },
+        },
+        tx,
+      );
     });
 
     return { removed: true };
@@ -428,6 +450,7 @@ export class OrganizationsService {
       );
     }
 
+    // Зміна власника + аудит атомарно: збій журналу відкочує передачу прав.
     await this.prisma.$transaction(async (tx) => {
       await tx.organizationMembership.update({
         where: {
@@ -442,15 +465,17 @@ export class OrganizationsService {
         where: { id: target.id },
         data: { role: 'owner' },
       });
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'organization.transfer_ownership',
-      targetType: 'organization',
-      targetId: orgId,
-      metadata: { from: actor.id, to: toIdentityId },
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'organization.transfer_ownership',
+          targetType: 'organization',
+          targetId: orgId,
+          metadata: { from: actor.id, to: toIdentityId },
+        },
+        tx,
+      );
     });
 
     return { ownerId: toIdentityId };

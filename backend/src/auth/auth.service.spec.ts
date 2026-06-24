@@ -1,5 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma.service';
 import { PasswordService } from './password.service';
@@ -21,24 +24,31 @@ function principal(overrides: Partial<AuthPrincipal> = {}): AuthPrincipal {
   };
 }
 
-describe('AuthService logout (M2 — session revocation)', () => {
+describe('AuthService (M2 logout + fail-closed auth audit)', () => {
   let service: AuthService;
+  let prisma: { identity: { findUnique: jest.Mock } };
+  let passwords: { verify: jest.Mock };
   let sessions: { issue: jest.Mock; verify: jest.Mock; revoke: jest.Mock };
-  let audit: { log: jest.Mock };
+  let audit: { logRequired: jest.Mock; logBestEffort: jest.Mock };
 
   beforeEach(async () => {
+    prisma = { identity: { findUnique: jest.fn() } };
+    passwords = { verify: jest.fn().mockResolvedValue(true) };
     sessions = {
-      issue: jest.fn(),
+      issue: jest.fn().mockResolvedValue('sess_token'),
       verify: jest.fn(),
       revoke: jest.fn().mockResolvedValue(undefined),
     };
-    audit = { log: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      logRequired: jest.fn().mockResolvedValue(undefined),
+      logBestEffort: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
-        { provide: PrismaService, useValue: {} },
-        { provide: PasswordService, useValue: {} },
+        { provide: PrismaService, useValue: prisma },
+        { provide: PasswordService, useValue: passwords },
         { provide: SessionService, useValue: sessions },
         { provide: AuditService, useValue: audit },
       ],
@@ -47,13 +57,42 @@ describe('AuthService logout (M2 — session revocation)', () => {
     service = module.get<AuthService>(AuthService);
   });
 
+  // Test #5: login/logout must fail if the required audit write fails.
+  it('login fails with a safe 503 when the required audit write fails', async () => {
+    prisma.identity.findUnique.mockResolvedValue({
+      id: 'id-1',
+      name: 'Human',
+      email: 'human@example.com',
+      type: 'human',
+      isSuperadmin: false,
+      passwordHash: 'scrypt$salt$hash',
+    });
+    audit.logRequired.mockRejectedValueOnce(
+      new ServiceUnavailableException('Audit log unavailable'),
+    );
+
+    await expect(
+      service.login('human@example.com', 'pw'),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('logout fails with a safe 503 when the required audit write fails', async () => {
+    audit.logRequired.mockRejectedValueOnce(
+      new ServiceUnavailableException('Audit log unavailable'),
+    );
+
+    await expect(service.logout(principal())).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
   // Test #2: DELETE /auth/session with a session token revokes that session.
   it('revokes the current session and audits the logout', async () => {
     await expect(service.logout(principal())).resolves.toEqual({
       revoked: true,
     });
     expect(sessions.revoke).toHaveBeenCalledWith('sess-row-1');
-    expect(audit.log).toHaveBeenCalledWith(
+    expect(audit.logRequired).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'auth.logout', actorId: 'id-1' }),
     );
   });
@@ -67,7 +106,7 @@ describe('AuthService logout (M2 — session revocation)', () => {
       BadRequestException,
     );
     expect(sessions.revoke).not.toHaveBeenCalled();
-    expect(audit.log).not.toHaveBeenCalled();
+    expect(audit.logRequired).not.toHaveBeenCalled();
   });
 
   it('rejects a session principal with no sessionId (defensive) without revoking', async () => {

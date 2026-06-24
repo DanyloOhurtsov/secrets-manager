@@ -29,14 +29,17 @@ describe('EnvironmentsService', () => {
       findMany: jest.Mock;
       findUnique: jest.Mock;
       update: jest.Mock;
+      create: jest.Mock;
+      delete: jest.Mock;
     };
+    $transaction: jest.Mock;
   };
   let authz: {
     getProjectForActor: jest.Mock;
     environmentScopeForActor: jest.Mock;
     checkProjectAccess: jest.Mock;
   };
-  let audit: { log: jest.Mock };
+  let audit: { logRequired: jest.Mock; logBestEffort: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -53,7 +56,17 @@ describe('EnvironmentsService', () => {
           name: 'prod',
           projectId: 'proj-1',
         }),
+        create: jest.fn().mockResolvedValue({
+          id: 'env-new',
+          name: 'qa',
+          projectId: 'proj-1',
+        }),
+        delete: jest.fn().mockResolvedValue({ id: 'env-prod' }),
       },
+      // Транзакція виконує колбек із prisma-моком як tx (аудит — усередині).
+      $transaction: jest
+        .fn()
+        .mockImplementation((cb: (tx: unknown) => unknown) => cb(prisma)),
     };
     authz = {
       getProjectForActor: jest
@@ -62,7 +75,10 @@ describe('EnvironmentsService', () => {
       environmentScopeForActor: jest.fn(),
       checkProjectAccess: jest.fn().mockResolvedValue(undefined),
     };
-    audit = { log: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      logRequired: jest.fn().mockResolvedValue(undefined),
+      logBestEffort: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -114,11 +130,12 @@ describe('EnvironmentsService', () => {
       where: { id: 'env-prod' },
       data: { name: 'prod' },
     });
-    expect(audit.log).toHaveBeenCalledWith(
+    expect(audit.logRequired).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'environment.update',
         metadata: { from: 'production', to: 'prod' },
       }),
+      expect.anything(), // транзакційний клієнт (аудит у тій самій транзакції)
     );
   });
 
@@ -132,6 +149,6 @@ describe('EnvironmentsService', () => {
     await expect(service.rename(actor, 'env-prod', 'staging')).rejects.toThrow(
       ConflictException,
     );
-    expect(audit.log).not.toHaveBeenCalled();
+    expect(audit.logRequired).not.toHaveBeenCalled();
   });
 });

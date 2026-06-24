@@ -415,7 +415,9 @@ describe('AuthorizationService', () => {
       prisma.organizationMembership.findUnique.mockResolvedValue({
         role: 'member',
       });
-      prisma.grant.findFirst.mockResolvedValue(grant({ identityId: 'actor-1' }));
+      prisma.grant.findFirst.mockResolvedValue(
+        grant({ identityId: 'actor-1' }),
+      );
 
       await expect(
         service.getProjectForActor(human(), 'proj-1'),

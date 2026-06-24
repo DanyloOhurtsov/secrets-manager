@@ -33,7 +33,7 @@ export class AuthService {
 
     const sessionToken = await this.sessions.issue(identity.id);
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId: identity.id,
       action: 'auth.login',
       targetType: 'identity',
@@ -65,7 +65,7 @@ export class AuthService {
 
     await this.sessions.revoke(actor.sessionId);
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId: actor.id,
       action: 'auth.logout',
       targetType: 'identity',

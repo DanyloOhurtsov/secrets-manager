@@ -165,21 +165,27 @@ export class AdminService {
     });
     if (!org) throw new NotFoundException('Organization not found');
 
-    const updated = await this.prisma.organization.update({
-      where: { id: organizationId },
-      data: { status },
-    });
-
-    await this.audit.log({
-      actorId,
-      organizationId,
-      action:
-        status === 'suspended'
-          ? 'organization.suspend'
-          : 'organization.unsuspend',
-      targetType: 'organization',
-      targetId: organizationId,
-      metadata: { status },
+    // Зміна статусу + аудит атомарно: збій журналу відкочує suspend/unsuspend.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.organization.update({
+        where: { id: organizationId },
+        data: { status },
+      });
+      await this.audit.logRequired(
+        {
+          actorId,
+          organizationId,
+          action:
+            status === 'suspended'
+              ? 'organization.suspend'
+              : 'organization.unsuspend',
+          targetType: 'organization',
+          targetId: organizationId,
+          metadata: { status },
+        },
+        tx,
+      );
+      return result;
     });
 
     return { id: updated.id, status: updated.status };

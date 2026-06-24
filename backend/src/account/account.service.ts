@@ -53,18 +53,26 @@ export class AccountService {
       );
     }
 
-    const token = await this.tokens.issue(
-      actor.id,
-      label,
-      expiryFromDays(expiresInDays),
-    );
-
-    await this.audit.log({
-      actorId: actor.id,
-      action: 'token.issue',
-      targetType: 'identity',
-      targetId: actor.id,
-      metadata: { label: label ?? null, self: true },
+    // Видача токена + обов'язковий аудит — в одній транзакції. Якщо аудит впав,
+    // рядок токена відкочується: повернений рядок неробочий і метод кидає 503.
+    const token = await this.prisma.$transaction(async (tx) => {
+      const issued = await this.tokens.issue(
+        actor.id,
+        label,
+        expiryFromDays(expiresInDays),
+        tx,
+      );
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          action: 'token.issue',
+          targetType: 'identity',
+          targetId: actor.id,
+          metadata: { label: label ?? null, self: true },
+        },
+        tx,
+      );
+      return issued;
     });
 
     // Сам токен показуємо лише раз.
@@ -94,15 +102,22 @@ export class AccountService {
       throw new NotFoundException('Token not found');
     }
 
-    await this.tokens.revoke(tokenId);
-
-    await this.audit.log({
-      actorId: actor.id,
-      action: 'token.revoke',
-      targetType: 'token',
-      targetId: tokenId,
-      metadata: { self: true },
+    // Відкликання + аудит атомарно; кеш інвалідуємо лише після коміту.
+    const tokenHash = await this.prisma.$transaction(async (tx) => {
+      const hash = await this.tokens.revoke(tokenId, tx);
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          action: 'token.revoke',
+          targetType: 'token',
+          targetId: tokenId,
+          metadata: { self: true },
+        },
+        tx,
+      );
+      return hash;
     });
+    await this.tokens.invalidateCache(tokenHash);
 
     return { revoked: true };
   }

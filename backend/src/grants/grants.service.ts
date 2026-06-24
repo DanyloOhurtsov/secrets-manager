@@ -89,22 +89,45 @@ export class GrantsService {
     const role = this.normalizeRole(dto.role);
     const isAdmin = role === 'admin';
 
+    // Створення гранту + обов'язковий аудит — в ОДНІЙ транзакції: якщо запис у
+    // журнал падає, грант відкочується (transaction-level fail-closed).
     let grant: Grant;
     try {
-      grant = await this.prisma.grant.create({
-        data: {
-          identityId: dto.identityId,
-          projectId: project.id,
-          scopeType: env ? 'environment' : 'project',
-          scopeId: env?.id ?? project.id,
-          role,
-          canRevealSecrets: dto.canRevealSecrets ?? isAdmin,
-          canCreateSecrets: dto.canCreateSecrets ?? isAdmin,
-          canUpdateSecrets: dto.canUpdateSecrets ?? isAdmin,
-          canDeleteSecrets: dto.canDeleteSecrets ?? isAdmin,
-          canRollbackSecrets: dto.canRollbackSecrets ?? isAdmin,
-          canManageGrants: dto.canManageGrants ?? isAdmin,
-        },
+      grant = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.grant.create({
+          data: {
+            identityId: dto.identityId,
+            projectId: project.id,
+            scopeType: env ? 'environment' : 'project',
+            scopeId: env?.id ?? project.id,
+            role,
+            canRevealSecrets: dto.canRevealSecrets ?? isAdmin,
+            canCreateSecrets: dto.canCreateSecrets ?? isAdmin,
+            canUpdateSecrets: dto.canUpdateSecrets ?? isAdmin,
+            canDeleteSecrets: dto.canDeleteSecrets ?? isAdmin,
+            canRollbackSecrets: dto.canRollbackSecrets ?? isAdmin,
+            canManageGrants: dto.canManageGrants ?? isAdmin,
+          },
+        });
+        await this.audit.logRequired(
+          {
+            actorId: actor.id,
+            organizationId: orgId,
+            projectId: project.id,
+            environmentId: env?.id ?? null,
+            action: 'grant.create',
+            targetType: 'grant',
+            targetId: created.id,
+            metadata: {
+              identityId: dto.identityId,
+              role,
+              scopeType: created.scopeType,
+              scopeId: created.scopeId,
+            },
+          },
+          tx,
+        );
+        return created;
       });
     } catch (err) {
       if (
@@ -117,22 +140,6 @@ export class GrantsService {
       }
       throw err;
     }
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      projectId: project.id,
-      environmentId: env?.id ?? null,
-      action: 'grant.create',
-      targetType: 'grant',
-      targetId: grant.id,
-      metadata: {
-        identityId: dto.identityId,
-        role,
-        scopeType: grant.scopeType,
-        scopeId: grant.scopeId,
-      },
-    });
 
     return grant;
   }
@@ -246,11 +253,28 @@ export class GrantsService {
       }
     }
 
+    // Оновлення гранту + аудит атомарно: збій журналу відкочує зміну прав.
     let updated: Grant;
     try {
-      updated = await this.prisma.grant.update({
-        where: { id: grantId },
-        data,
+      updated = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.grant.update({ where: { id: grantId }, data });
+        await this.audit.logRequired(
+          {
+            actorId: actor.id,
+            organizationId: orgId,
+            projectId: project.id,
+            environmentId: dto.environment !== undefined ? scopeEnvId : null,
+            action: 'grant.update',
+            targetType: 'grant',
+            targetId: grantId,
+            metadata: {
+              identityId: grant.identityId,
+              changes: data,
+            },
+          },
+          tx,
+        );
+        return result;
       });
     } catch (err) {
       if (
@@ -264,20 +288,6 @@ export class GrantsService {
       throw err;
     }
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      projectId: project.id,
-      environmentId: dto.environment !== undefined ? scopeEnvId : null,
-      action: 'grant.update',
-      targetType: 'grant',
-      targetId: grantId,
-      metadata: {
-        identityId: grant.identityId,
-        changes: data,
-      },
-    });
-
     return updated;
   }
 
@@ -286,20 +296,25 @@ export class GrantsService {
     await this.authz.assertOrganizationAdmin(actor.id, orgId);
     const { grant, project } = await this.loadGrantInOrg(grantId, orgId);
 
-    await this.prisma.grant.delete({ where: { id: grantId } });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      projectId: project.id,
-      action: 'grant.revoke',
-      targetType: 'grant',
-      targetId: grantId,
-      metadata: {
-        identityId: grant.identityId,
-        scopeType: grant.scopeType,
-        scopeId: grant.scopeId,
-      },
+    // Видалення гранту + аудит атомарно: збій журналу відкочує відкликання.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.grant.delete({ where: { id: grantId } });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          projectId: project.id,
+          action: 'grant.revoke',
+          targetType: 'grant',
+          targetId: grantId,
+          metadata: {
+            identityId: grant.identityId,
+            scopeType: grant.scopeType,
+            scopeId: grant.scopeId,
+          },
+        },
+        tx,
+      );
     });
 
     return { revoked: true };

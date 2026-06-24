@@ -35,7 +35,10 @@ describe('ProjectsService', () => {
       providers: [
         ProjectsService,
         { provide: PrismaService, useValue: prisma },
-        { provide: AuditService, useValue: { log: jest.fn() } },
+        {
+          provide: AuditService,
+          useValue: { logRequired: jest.fn(), logBestEffort: jest.fn() },
+        },
         { provide: AuthorizationService, useValue: authz },
       ],
     }).compile();

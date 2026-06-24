@@ -31,10 +31,7 @@ describe('SessionService', () => {
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        SessionService,
-        { provide: PrismaService, useValue: prisma },
-      ],
+      providers: [SessionService, { provide: PrismaService, useValue: prisma }],
     }).compile();
 
     service = module.get<SessionService>(SessionService);

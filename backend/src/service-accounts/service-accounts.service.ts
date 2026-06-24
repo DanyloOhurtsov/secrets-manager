@@ -40,24 +40,30 @@ export class ServiceAccountsService {
       }
     }
 
-    const identity = await this.prisma.identity.create({
-      data: { name, type: 'service', serviceOrganizationId: orgId },
-      select: {
-        id: true,
-        name: true,
-        type: true,
-        serviceOrganizationId: true,
-        createdAt: true,
-      },
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'service_account.create',
-      targetType: 'identity',
-      targetId: identity.id,
-      metadata: { name },
+    // Створення + аудит атомарно: збій журналу відкочує сервіс-акаунт.
+    const identity = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.identity.create({
+        data: { name, type: 'service', serviceOrganizationId: orgId },
+        select: {
+          id: true,
+          name: true,
+          type: true,
+          serviceOrganizationId: true,
+          createdAt: true,
+        },
+      });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'service_account.create',
+          targetType: 'identity',
+          targetId: created.id,
+          metadata: { name },
+        },
+        tx,
+      );
+      return created;
     });
 
     return identity;
@@ -102,19 +108,25 @@ export class ServiceAccountsService {
     await this.authz.assertOrganizationAdmin(actor.id, orgId);
     await this.getServiceAccountOrThrow(orgId, identityId);
 
-    const token = await this.tokens.issue(
-      identityId,
-      label,
-      expiryFromDays(expiresInDays),
-    );
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'token.issue',
-      targetType: 'identity',
-      targetId: identityId,
-      metadata: { label: label ?? null },
+    const token = await this.prisma.$transaction(async (tx) => {
+      const issued = await this.tokens.issue(
+        identityId,
+        label,
+        expiryFromDays(expiresInDays),
+        tx,
+      );
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'token.issue',
+          targetType: 'identity',
+          targetId: identityId,
+          metadata: { label: label ?? null },
+        },
+        tx,
+      );
+      return issued;
     });
 
     return { token };
@@ -153,16 +165,22 @@ export class ServiceAccountsService {
       throw new NotFoundException('Token not found');
     }
 
-    await this.tokens.revoke(tokenId);
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'token.revoke',
-      targetType: 'token',
-      targetId: tokenId,
-      metadata: { identityId },
+    const tokenHash = await this.prisma.$transaction(async (tx) => {
+      const hash = await this.tokens.revoke(tokenId, tx);
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'token.revoke',
+          targetType: 'token',
+          targetId: tokenId,
+          metadata: { identityId },
+        },
+        tx,
+      );
+      return hash;
     });
+    await this.tokens.invalidateCache(tokenHash);
 
     return { revoked: true };
   }
@@ -171,21 +189,32 @@ export class ServiceAccountsService {
     await this.authz.assertOrganizationAdmin(actor.id, orgId);
     const account = await this.getServiceAccountOrThrow(orgId, identityId);
 
+    // Усе в одній транзакції: токени, гранти, identity та обов'язковий аудит.
     // FK на Token та Grant — RESTRICT, тож приберемо їх перед самим identity.
-    await this.tokens.deleteAllForIdentity(identityId);
-    await this.prisma.$transaction(async (tx) => {
+    // Збій аудиту відкочує ВСЕ видалення. Кеш токенів інвалідуємо після коміту.
+    const tokenHashes = await this.prisma.$transaction(async (tx) => {
+      const hashes = await this.tokens.deleteAllForIdentityInTransaction(
+        tx,
+        identityId,
+      );
       await tx.grant.deleteMany({ where: { identityId } });
       await tx.identity.delete({ where: { id: identityId } });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: orgId,
+          action: 'service_account.delete',
+          targetType: 'identity',
+          targetId: identityId,
+          metadata: { name: account.name },
+        },
+        tx,
+      );
+      return hashes;
     });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: orgId,
-      action: 'service_account.delete',
-      targetType: 'identity',
-      targetId: identityId,
-      metadata: { name: account.name },
-    });
+    await Promise.all(
+      tokenHashes.map((hash) => this.tokens.invalidateCache(hash)),
+    );
 
     return { deleted: true };
   }

@@ -22,18 +22,26 @@ describe('ServiceAccountsService', () => {
   let prisma: {
     organization: { findUnique: jest.Mock };
     identity: { count: jest.Mock; create: jest.Mock };
+    $transaction: jest.Mock;
   };
   let authz: { assertOrganizationAdmin: jest.Mock };
-  let audit: { log: jest.Mock };
+  let audit: { logRequired: jest.Mock; logBestEffort: jest.Mock };
   let tokens: { deleteAllForIdentity: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
       organization: { findUnique: jest.fn() },
       identity: { count: jest.fn(), create: jest.fn() },
+      // Транзакція виконує колбек із prisma-моком як tx (аудит — усередині).
+      $transaction: jest
+        .fn()
+        .mockImplementation((cb: (tx: unknown) => unknown) => cb(prisma)),
     };
     authz = { assertOrganizationAdmin: jest.fn().mockResolvedValue(undefined) };
-    audit = { log: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      logRequired: jest.fn().mockResolvedValue(undefined),
+      logBestEffort: jest.fn().mockResolvedValue(undefined),
+    };
     tokens = { deleteAllForIdentity: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({

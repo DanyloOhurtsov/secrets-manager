@@ -21,7 +21,7 @@ export class RotationService {
   async rotate(actorId: string) {
     const activeVersion = this.keyProvider.getActiveVersion();
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId,
       action: 'key_rotation.start',
       targetType: 'system',
@@ -64,7 +64,7 @@ export class RotationService {
       }
     }
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId,
       action: 'key_rotation.complete',
       targetType: 'system',

@@ -84,17 +84,20 @@ export class ProjectsService {
           canManageGrants: true,
         },
       });
+      // Аудит у тій самій транзакції: збій журналу відкочує проєкт і грант.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: organization.id,
+          projectId: created.id,
+          action: 'project.create',
+          targetType: 'project',
+          targetId: created.id,
+          metadata: { name },
+        },
+        tx,
+      );
       return created;
-    });
-
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: organization.id,
-      projectId: project.id,
-      action: 'project.create',
-      targetType: 'project',
-      targetId: project.id,
-      metadata: { name },
     });
 
     return project;
@@ -246,21 +249,25 @@ export class ProjectsService {
         data: { organizationId: targetOrganizationId },
       });
 
-      return { revoked: toRevoke.length };
-    });
+      // Аудит у тій самій транзакції: збій журналу відкочує перенос і зняття грантів.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: targetOrganizationId,
+          projectId,
+          action: 'project.transfer',
+          targetType: 'project',
+          targetId: projectId,
+          metadata: {
+            fromOrganizationId: project.organizationId,
+            toOrganizationId: targetOrganizationId,
+            revokedGrants: toRevoke.length,
+          },
+        },
+        tx,
+      );
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: targetOrganizationId,
-      projectId,
-      action: 'project.transfer',
-      targetType: 'project',
-      targetId: projectId,
-      metadata: {
-        fromOrganizationId: project.organizationId,
-        toOrganizationId: targetOrganizationId,
-        revokedGrants: revoked,
-      },
+      return { revoked: toRevoke.length };
     });
 
     return { transferred: true, revokedGrants: revoked };
@@ -271,16 +278,24 @@ export class ProjectsService {
     if (!project) throw new NotFoundException('Project not found');
     await this.authz.checkProjectAccess(actor, id, 'manageProject');
 
-    await this.audit.log({
-      actorId: actor.id,
-      organizationId: project.organizationId,
-      projectId: id,
-      action: 'project.delete',
-      targetType: 'project',
-      targetId: id,
-      metadata: { name: project.name },
+    // Видалення + аудит атомарно: збій журналу відкочує видалення проєкту.
+    const deleted = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.project.delete({ where: { id } });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: project.organizationId,
+          projectId: id,
+          action: 'project.delete',
+          targetType: 'project',
+          targetId: id,
+          metadata: { name: project.name },
+        },
+        tx,
+      );
+      return result;
     });
 
-    return this.prisma.project.delete({ where: { id } });
+    return deleted;
   }
 }

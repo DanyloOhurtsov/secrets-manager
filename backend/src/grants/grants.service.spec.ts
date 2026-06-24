@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { GrantsService } from './grants.service';
@@ -34,11 +35,12 @@ describe('GrantsService', () => {
       findUnique: jest.Mock;
       delete: jest.Mock;
     };
+    $transaction: jest.Mock;
   };
   let authz: {
     assertOrganizationAdmin: jest.Mock;
   };
-  let audit: { log: jest.Mock };
+  let audit: { logRequired: jest.Mock; logBestEffort: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -52,11 +54,20 @@ describe('GrantsService', () => {
         findUnique: jest.fn(),
         delete: jest.fn(),
       },
+      // За замовчуванням транзакція виконує колбек із самим prisma-моком як tx,
+      // тож існуючі assertions на prisma.grant.* лишаються чинними, а
+      // audit.logRequired(entry, tx) викликається всередині транзакції.
+      $transaction: jest
+        .fn()
+        .mockImplementation((cb: (tx: unknown) => unknown) => cb(prisma)),
     };
     authz = {
       assertOrganizationAdmin: jest.fn().mockResolvedValue(undefined),
     };
-    audit = { log: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      logRequired: jest.fn().mockResolvedValue(undefined),
+      logBestEffort: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -93,7 +104,9 @@ describe('GrantsService', () => {
   it('denies grant creation when the actor is not an org owner/admin (canManageGrants does not help)', async () => {
     // Симулюємо звичайного учасника/девелопера, навіть якщо в нього є грант із
     // canManageGrants: assertOrganizationAdmin кидає Forbidden.
-    authz.assertOrganizationAdmin.mockRejectedValueOnce(new ForbiddenException());
+    authz.assertOrganizationAdmin.mockRejectedValueOnce(
+      new ForbiddenException(),
+    );
 
     await expect(
       service.create(actor, 'org-1', {
@@ -114,7 +127,9 @@ describe('GrantsService', () => {
   });
 
   it('denies a non-admin actor creating a reveal/admin grant for themselves', async () => {
-    authz.assertOrganizationAdmin.mockRejectedValueOnce(new ForbiddenException());
+    authz.assertOrganizationAdmin.mockRejectedValueOnce(
+      new ForbiddenException(),
+    );
 
     await expect(
       service.create(actor, 'org-1', {
@@ -128,7 +143,9 @@ describe('GrantsService', () => {
   });
 
   it('denies a non-admin actor updating a grant to add canRevealSecrets (self-escalation)', async () => {
-    authz.assertOrganizationAdmin.mockRejectedValueOnce(new ForbiddenException());
+    authz.assertOrganizationAdmin.mockRejectedValueOnce(
+      new ForbiddenException(),
+    );
 
     await expect(
       service.update(actor, 'org-1', 'grant-1', { canRevealSecrets: true }),
@@ -140,7 +157,9 @@ describe('GrantsService', () => {
   });
 
   it('denies a non-admin actor revoking a grant', async () => {
-    authz.assertOrganizationAdmin.mockRejectedValueOnce(new ForbiddenException());
+    authz.assertOrganizationAdmin.mockRejectedValueOnce(
+      new ForbiddenException(),
+    );
 
     await expect(
       service.revoke(actor, 'org-1', 'grant-1'),
@@ -176,12 +195,13 @@ describe('GrantsService', () => {
     expect(prisma.grant.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: developerData }),
     );
-    expect(audit.log).toHaveBeenCalledWith(
+    expect(audit.logRequired).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'grant.create',
         organizationId: 'org-1',
         projectId: 'proj-1',
       }),
+      expect.anything(), // транзакційний клієнт
     );
   });
 
@@ -327,11 +347,12 @@ describe('GrantsService', () => {
       where: { id: 'grant-1' },
       data: envScopeData,
     });
-    expect(audit.log).toHaveBeenCalledWith(
+    expect(audit.logRequired).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'grant.update',
         environmentId: 'env-prod',
       }),
+      expect.anything(), // транзакційний клієнт
     );
   });
 
@@ -405,6 +426,68 @@ describe('GrantsService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  // --- Fail-closed audit: збій обов'язкового журналу валить grant CRUD (503) ---
+
+  // Required proof #1: a failed audit write rolls back the created grant.
+  it('rolls back the created grant when the required audit write fails (transaction-level)', async () => {
+    arrangeProjectAndMember();
+
+    let committed = false;
+    prisma.$transaction.mockImplementationOnce(
+      async (cb: (tx: unknown) => unknown) => {
+        const tx = {
+          grant: {
+            create: jest.fn().mockResolvedValue({
+              id: 'grant-1',
+              scopeType: 'project',
+              scopeId: 'proj-1',
+            }),
+          },
+        };
+        const result = await cb(tx); // audit.logRequired кидає тут → коміт нижче недосяжний
+        committed = true;
+        return result;
+      },
+    );
+    audit.logRequired.mockRejectedValueOnce(
+      new ServiceUnavailableException('Audit log unavailable'),
+    );
+
+    await expect(
+      service.create(actor, 'org-1', {
+        identityId: 'id-2',
+        projectId: 'proj-1',
+        role: 'developer',
+      }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    // Колбек кинув до точки коміту → транзакція не закомічена → грант відкочено.
+    expect(committed).toBe(false);
+  });
+
+  it('update fails with 503 when the required audit write fails', async () => {
+    arrangeWholeProjectGrant();
+    prisma.grant.update.mockResolvedValue({ id: 'grant-1' });
+    audit.logRequired.mockRejectedValueOnce(
+      new ServiceUnavailableException('Audit log unavailable'),
+    );
+
+    await expect(
+      service.update(actor, 'org-1', 'grant-1', { role: 'reader' }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('revoke fails with 503 when the required audit write fails', async () => {
+    arrangeWholeProjectGrant();
+    prisma.grant.delete.mockResolvedValue({ id: 'grant-1' });
+    audit.logRequired.mockRejectedValueOnce(
+      new ServiceUnavailableException('Audit log unavailable'),
+    );
+
+    await expect(
+      service.revoke(actor, 'org-1', 'grant-1'),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
   // --- H1: org owner/admin зберігає повне керування грантами (включно з
   // аудитованим self-grant reveal як break-glass) ---
 
@@ -423,12 +506,13 @@ describe('GrantsService', () => {
     expect(prisma.grant.delete).toHaveBeenCalledWith({
       where: { id: 'grant-1' },
     });
-    expect(audit.log).toHaveBeenCalledWith(
+    expect(audit.logRequired).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'grant.revoke',
         organizationId: 'org-1',
         projectId: 'proj-1',
       }),
+      expect.anything(), // транзакційний клієнт
     );
   });
 
@@ -466,12 +550,13 @@ describe('GrantsService', () => {
     expect(prisma.grant.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: selfRevealData }),
     );
-    expect(audit.log).toHaveBeenCalledWith(
+    expect(audit.logRequired).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'grant.create',
         organizationId: 'org-1',
         projectId: 'proj-1',
       }),
+      expect.anything(), // транзакційний клієнт
     );
   });
 });

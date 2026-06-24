@@ -1,5 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { AccountService } from './account.service';
 import { PrismaService } from '../prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -22,17 +26,31 @@ function principal(overrides: Partial<AuthPrincipal> = {}): AuthPrincipal {
 
 describe('AccountService', () => {
   let service: AccountService;
-  let prisma: { token: { findUnique: jest.Mock } };
-  let tokens: { issue: jest.Mock; revoke: jest.Mock };
-  let audit: { log: jest.Mock };
+  let prisma: { token: { findUnique: jest.Mock }; $transaction: jest.Mock };
+  let tokens: {
+    issue: jest.Mock;
+    revoke: jest.Mock;
+    invalidateCache: jest.Mock;
+  };
+  let audit: { logRequired: jest.Mock; logBestEffort: jest.Mock };
 
   beforeEach(async () => {
-    prisma = { token: { findUnique: jest.fn() } };
+    prisma = {
+      token: { findUnique: jest.fn() },
+      // Транзакція виконує колбек із prisma-моком як tx (аудит — усередині).
+      $transaction: jest
+        .fn()
+        .mockImplementation((cb: (tx: unknown) => unknown) => cb(prisma)),
+    };
     tokens = {
       issue: jest.fn().mockResolvedValue('sm_test'),
-      revoke: jest.fn().mockResolvedValue(undefined),
+      revoke: jest.fn().mockResolvedValue('hash-1'),
+      invalidateCache: jest.fn().mockResolvedValue(undefined),
     };
-    audit = { log: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      logRequired: jest.fn().mockResolvedValue(undefined),
+      logBestEffort: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -66,6 +84,30 @@ describe('AccountService', () => {
     ];
     expect(expiresAt).toBeInstanceOf(Date);
     expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  // Required proof #4: token.issue audit failure rolls back the token and
+  // returns nothing usable to the caller.
+  it('token.issue: audit failure rolls back the token and returns no token', async () => {
+    let committed = false;
+    prisma.$transaction.mockImplementationOnce(
+      async (cb: (tx: unknown) => unknown) => {
+        const result = await cb({}); // tokens.issue resolves, then audit throws
+        committed = true;
+        return result;
+      },
+    );
+    tokens.issue.mockResolvedValue('sm_would_be_rolled_back');
+    audit.logRequired.mockRejectedValueOnce(
+      new ServiceUnavailableException('Audit log unavailable'),
+    );
+
+    await expect(service.createToken(principal(), 'ci')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    // Транзакція не закомічена → рядок токена відкочується (повернений рядок
+    // неробочий), а виклику жодного токена не повертаємо.
+    expect(committed).toBe(false);
   });
 
   it('does not let a user revoke a token they do not own', async () => {
