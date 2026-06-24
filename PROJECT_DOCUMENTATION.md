@@ -218,7 +218,7 @@ npm run build  # компіляція у dist/
 Глобально застосовані:
 
 - `ValidationPipe` з `whitelist`, `forbidNonWhitelisted`, `transform`;
-- `ThrottlerGuard`, default limit `100` запитів на хвилину;
+- `ThrottlerGuard`, default limit `100` запитів на хвилину, зі сховищем у Redis (`RedisThrottlerStorage`), тож ліміти спільні між усіма інстансами бекенду;
 - `AuthGuard`, який вимагає `Authorization: Bearer ...` для всіх маршрутів, окрім `@Public()`.
 - `helmet` з вузькою Content-Security-Policy та базовими security headers.
 
@@ -434,10 +434,33 @@ DELETE /environments/:environmentId/secrets/:id
 
 Rate limits:
 
-- список секретів: `60/min`;
-- reveal одного секрету: `30/min`;
-- signup: `5/min`.
-- login: `5/min`.
+- список секретів: `60/min` (на IP);
+- reveal одного секрету: `30/min` (на IP);
+- signup: `5/min` на IP **і** `5/min` на нормалізований email;
+- login: `5/min` на IP **і** `5/min` на нормалізований email.
+
+**Двовимірне обмеження для auth-маршрутів.** Login і signup обмежуються і за IP
+(`@Throttle`, глобальний `ThrottlerGuard`), і окремим акаунт-виміром —
+`AccountThrottlerGuard` інкрементує бакет за SHA-256 від нормалізованого (`trim` +
+`lowercase`) поданого email. Рахуємо саме подане значення (а не запис у БД), тож
+невідомі й відомі email потрапляють в один бакет, і відповідь 429 не виказує,
+чи існує акаунт. Виміри незалежні: один email обмежується навіть із багатьох IP
+(NAT / проксі / ботнет), а per-IP route-ліміт усе одно діє, коли email змінюється.
+Login і signup мають окремі бакети (ім'я маршруту входить у ключ).
+
+**Спільне сховище (Redis) + безпечна деградація.** Увесь throttling — і IP, і
+акаунт — працює через `RedisThrottlerStorage`: атомарний fixed-window лічильник на
+одному Redis `EVAL` (Lua), тож ліміти спільні між інстансами. Якщо Redis недоступний,
+throttling **не** вимикається мовчки: сховище деградує (fail-open) лише до
+вбудованого in-memory лічильника (per-process) і один раз пише попередження в лог,
+тож ліміти лишаються чинними (просто не на весь кластер), доки Redis не відновиться.
+
+**Проксі в проді / `req.ip`.** IP-вимір спирається на `req.ip`. За реверс-проксі /
+інгресом виставте змінну `TRUST_PROXY`, щоб Express брав справжній IP клієнта з
+`X-Forwarded-For` (напр. `TRUST_PROXY=1` — довіряти одному хопу проксі). Вмикайте
+**лише** коли довірений проксі сам виставляє/перезаписує `X-Forwarded-For`; ніколи не
+ставте `TRUST_PROXY=true` на відкритій мережі — інакше клієнти зможуть підробити
+заголовок і обійти IP-ліміти. Якщо `TRUST_PROXY` не задано, діє дефолт (без довіри).
 
 ### Grants
 

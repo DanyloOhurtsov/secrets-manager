@@ -218,7 +218,7 @@ The main module `backend/src/app.module.ts` wires:
 Global behavior:
 
 - `ValidationPipe` with `whitelist`, `forbidNonWhitelisted`, and `transform`;
-- `ThrottlerGuard`, default limit `100` requests per minute;
+- `ThrottlerGuard`, default limit `100` requests per minute, backed by Redis (`RedisThrottlerStorage`) so limits are shared across all backend instances;
 - `AuthGuard`, which requires `Authorization: Bearer ...` for every route except `@Public()` routes.
 - `helmet` with a narrow Content-Security-Policy and baseline security headers.
 
@@ -434,10 +434,34 @@ DELETE /environments/:environmentId/secrets/:id
 
 Rate limits:
 
-- secrets list: `60/min`;
-- reveal a single secret: `30/min`;
-- signup: `5/min`.
-- login: `5/min`.
+- secrets list: `60/min` (per IP);
+- reveal a single secret: `30/min` (per IP);
+- signup: `5/min` per IP **and** `5/min` per normalized email;
+- login: `5/min` per IP **and** `5/min` per normalized email.
+
+**Two-dimensional limiting for auth routes.** Login and signup are limited both by
+IP (`@Throttle`, the global `ThrottlerGuard`) and by a separate account dimension —
+`AccountThrottlerGuard` increments a bucket keyed by the SHA-256 of the normalized
+(`trim` + `lowercase`) submitted email. The email value (not the DB record) is
+counted, so unknown and known emails fall into the same bucket and the 429 response
+never reveals whether an account exists. The two dimensions are independent: a single
+email is throttled even when attempts come from many IPs (NAT / proxy / botnet), and
+the per-IP route limit still applies when the email varies. Login and signup use
+separate per-route buckets (the route name is part of the key).
+
+**Shared storage (Redis) + safe degradation.** All throttling — IP and account — runs
+through `RedisThrottlerStorage`, an atomic fixed-window counter implemented with a
+single Redis `EVAL` (Lua) so limits are shared across backend instances. If Redis is
+unavailable, throttling is **not** silently disabled: the storage fails open only to
+the built-in in-memory counter (per process) and logs a one-time warning, so the
+limits stay enforced (just not cluster-wide) until Redis recovers.
+
+**Production proxy / `req.ip`.** The IP dimension relies on `req.ip`. Behind a reverse
+proxy / ingress, set the `TRUST_PROXY` env var so Express resolves the real client IP
+from `X-Forwarded-For` (e.g. `TRUST_PROXY=1` to trust one proxy hop). Enable it **only**
+when a trusted proxy sets/overwrites `X-Forwarded-For`; never set `TRUST_PROXY=true` on
+an open network, or clients could spoof the header and bypass IP-based limits. When
+`TRUST_PROXY` is unset the default (no trust) applies.
 
 ### Grants
 

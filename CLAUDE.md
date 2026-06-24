@@ -51,8 +51,9 @@ Set via `.env` in `backend/` (loaded by `dotenv`). Without the key vars the app 
 - `DATABASE_URL` — Postgres connection (matches docker-compose: `postgresql://dev:dev@localhost:5433/secrets_manager`).
 - `MASTER_KEYS` — comma-separated `version:hex` entries, each 32 bytes hex (e.g. `v1:<64 hex chars>,v2:<64 hex chars>`).
 - `ACTIVE_KEY_VERSION` — which `MASTER_KEYS` version new secrets are wrapped with.
-- `REDIS_URL` — optional, defaults to `redis://localhost:6379` (cache failures degrade gracefully).
+- `REDIS_URL` — optional, defaults to `redis://localhost:6379` (backs the token cache **and** rate-limit storage; both degrade gracefully if Redis is down — throttling falls back to per-process in-memory counters).
 - `PORT` — optional, defaults to 3000.
+- `TRUST_PROXY` — optional. Set behind a trusted reverse proxy/ingress so Express resolves the real client IP from `X-Forwarded-For` for IP-based rate limiting (e.g. `1` = trust one hop). Leave unset otherwise; never `true` on an open network (clients could spoof the header).
 
 CLI reads `SECRETS_API_URL` / `SECRETS_TOKEN`, falling back to `~/.secrets-manager/config.json` (written mode 600 via `secrets login`).
 

@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Post, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { CurrentIdentity } from './current-identity.decorator';
 import { Public } from './public.decorator';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto';
+import { AccountThrottlerGuard } from '../throttler/account-throttler.guard';
 import type { AuthPrincipal } from './auth.types';
 
 interface Identity {
@@ -24,9 +25,12 @@ export class AuthController {
   // stuffing). Тримаємо жорсткий ліміт, як на signup: 5 спроб/60с на IP.
   // ThrottlerGuard рахує КОЖЕН запит (і вдалий, і невдалий) до обробника, тож
   // ліміт спрацьовує однаково для правильних і неправильних паролів.
+  // AccountThrottlerGuard додає окремий вимір — 5/60с на нормалізований email,
+  // щоб обмежити стаффінг на один акаунт із багатьох IP (NAT/проксі/ботнет).
   @Post('login')
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @UseGuards(AccountThrottlerGuard)
   login(@Body() body: LoginDto) {
     return this.auth.login(body.email, body.password);
   }

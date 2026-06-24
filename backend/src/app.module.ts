@@ -8,6 +8,8 @@ import { AuthModule } from './auth/auth.module';
 import { AuthGuard } from './auth/auth.guard';
 import { AuditModule } from './audit/audit.module';
 import { CacheModule } from './cache/cache.module';
+import { ThrottlingModule } from './throttler/throttling.module';
+import { RedisThrottlerStorage } from './throttler/redis-throttler-storage';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { ProjectsModule } from './projects/projects.module';
 import { EnvironmentsModule } from './environments/environments.module';
@@ -21,10 +23,21 @@ import { SignupModule } from './signup/signup.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    // Лише один глобальний throttler. Жорсткіші ліміти вмикаємо точково
-    // через @Throttle({ default: {...} }) на конкретних маршрутах —
+    ThrottlingModule,
+    // Лише один глобальний throttler (IP-вимір). Жорсткіші ліміти вмикаємо
+    // точково через @Throttle({ default: {...} }) на конкретних маршрутах —
     // другий root-throttler застосовувався б глобально до всіх роутів.
-    ThrottlerModule.forRoot([{ name: 'default', ttl: 60000, limit: 100 }]),
+    // Сховище — Redis (RedisThrottlerStorage), тож IP-ліміти спільні між
+    // інстансами; при недоступності Redis сховище деградує до in-memory.
+    // Акаунт-вимір (email) для login/signup додає AccountThrottlerGuard.
+    ThrottlerModule.forRootAsync({
+      imports: [ThrottlingModule],
+      inject: [RedisThrottlerStorage],
+      useFactory: (storage: RedisThrottlerStorage) => ({
+        throttlers: [{ name: 'default', ttl: 60000, limit: 100 }],
+        storage,
+      }),
+    }),
     AuthModule,
     AuditModule,
     CacheModule,
