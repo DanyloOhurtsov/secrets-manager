@@ -698,7 +698,17 @@ Fail-closed використовується для security-critical дій: re
 - Browser logout відкликає server-side session. Якщо сесію вкрадено, потрібен revoke на сервері, а не лише очищення localStorage.
 - Critical audit failures мають блокувати security-sensitive дії; не можна віддавати plaintext secret без audit record.
 
-## 20. Troubleshooting
+## 20. Наступні security-кроки
+
+Це roadmap, а не поточні гарантії системи:
+
+- AES-GCM AAD: прив'язати ciphertext/encrypted data key до контексту (`secretId`, `version`, `keyVersion`) і додати backward-compatible decrypt для вже існуючих записів.
+- Browser auth cookies: перенести `sess_...` із `localStorage` у `httpOnly`, `Secure`, `SameSite` cookie.
+- Soft-delete policy: визначити різницю між recoverable delete/version history і compliance hard purge.
+- Redis hardening: увімкнути authentication/TLS/network isolation для production Redis, бо Redis використовується для token cache і rate-limit storage.
+- Security e2e suite: додати окремі e2e для tenant isolation, audit scoping, service account isolation, session revoke і rate limiting на тестовій БД.
+
+## 21. Troubleshooting
 
 Backend падає з `MASTER_KEYS is not configured`:
 

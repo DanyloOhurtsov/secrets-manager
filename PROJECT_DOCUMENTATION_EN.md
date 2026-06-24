@@ -699,7 +699,17 @@ Fail-closed audit is used for security-critical actions: secret reveal, secret m
 - Browser logout revokes the server-side session. If a session is stolen, server-side revocation is required; clearing localStorage alone is not enough.
 - Critical audit failures must block security-sensitive actions; plaintext secrets must not be returned without an audit record.
 
-## 20. Troubleshooting
+## 20. Next Security Work
+
+This is a roadmap, not the current system guarantee:
+
+- AES-GCM AAD: bind ciphertext/encrypted data keys to context (`secretId`, `version`, `keyVersion`) and add backward-compatible decrypt for existing records.
+- Browser auth cookies: move `sess_...` out of `localStorage` and into an `httpOnly`, `Secure`, `SameSite` cookie.
+- Soft-delete policy: define the difference between recoverable delete/version history and compliance hard purge.
+- Redis hardening: enable authentication/TLS/network isolation for production Redis, because Redis backs token cache and rate-limit storage.
+- Security e2e suite: add dedicated e2e coverage for tenant isolation, audit scoping, service account isolation, session revoke, and rate limiting on a test database.
+
+## 21. Troubleshooting
 
 Backend fails with `MASTER_KEYS is not configured`:
 
