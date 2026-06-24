@@ -138,12 +138,10 @@ export class AuthorizationService {
     });
     if (!project) throw new NotFoundException('Project not found');
 
-    // Призупинена організація заморожує доступ до всіх своїх ресурсів —
-    // навіть для власних owner/admin. Розморожування — лише через platform admin.
-    if (project.organization.status !== 'active') {
-      throw new ForbiddenException('Organization is suspended');
-    }
-
+    // ВАЖЛИВО: спершу встановлюємо, чи має актор взагалі стосунок до проєкту, і
+    // лише ПОТІМ дивимось на статус організації. Інакше 403 "suspended" зливав би
+    // існування проєкту (і сам факт призупинення) випадковому автентифікованому
+    // користувачу — той, хто доступу не має, завжди отримує однаковий 404.
     const membership = await this.prisma.organizationMembership.findUnique({
       where: {
         organizationId_identityId: {
@@ -153,25 +151,31 @@ export class AuthorizationService {
       },
       select: { role: true },
     });
-    if (membership && ORG_ADMIN_ROLES.has(membership.role)) return project;
+    const isOrgAdmin = !!membership && ORG_ADMIN_ROLES.has(membership.role);
 
-    if (
+    // Сервіс-акаунт із чужої org не має жодного стосунку до проєкту.
+    const serviceFromOtherOrg =
       actor.type === 'service' &&
-      actor.serviceOrganizationId !== project.organizationId
-    ) {
-      throw new NotFoundException('Project not found');
+      actor.serviceOrganizationId !== project.organizationId;
+
+    let hasAccess = isOrgAdmin;
+    if (!hasAccess && !serviceFromOtherOrg) {
+      const grant = await this.prisma.grant.findFirst({
+        where: { identityId: actor.id, projectId },
+        select: { id: true },
+      });
+      hasAccess = !!grant;
     }
 
-    const grant = await this.prisma.grant.findFirst({
-      where: {
-        identityId: actor.id,
-        projectId,
-      },
-      select: { id: true },
-    });
-    if (grant) return project;
+    if (!hasAccess) throw new NotFoundException('Project not found');
 
-    throw new NotFoundException('Project not found');
+    // Доступ є — але призупинена організація заморожує всі свої ресурси, навіть
+    // для власних owner/admin. Розморожування — лише через platform admin.
+    if (project.organization.status !== 'active') {
+      throw new ForbiddenException('Organization is suspended');
+    }
+
+    return project;
   }
 
   // Які оточення проєкту бачить актор: 'all' (org owner/admin або грант на весь

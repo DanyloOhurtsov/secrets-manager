@@ -359,17 +359,79 @@ describe('AuthorizationService', () => {
 
   // --- Призупинена організація замикає весь доступ ---
   describe('suspended organization', () => {
+    const suspendedProject = {
+      ...activeProject,
+      organization: { id: 'org-1', status: 'suspended' },
+    };
+
+    beforeEach(() => {
+      prisma.project.findUnique.mockResolvedValue(suspendedProject);
+    });
+
     it('freezes access even for the org owner', async () => {
-      prisma.project.findUnique.mockResolvedValue({
-        ...activeProject,
-        organization: { id: 'org-1', status: 'suspended' },
-      });
       prisma.organizationMembership.findUnique.mockResolvedValue({
         role: 'owner',
       });
 
       await expect(
         service.checkProjectAccess(human(), 'proj-1', 'listSecrets'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    // Існування проєкту НЕ можна злити статусом org: хто доступу не має — 404,
+    // незалежно від того, активна org чи призупинена.
+    it('hides project existence from a non-member (NotFound, not Forbidden)', async () => {
+      // Жодного членства/гранту (дефолтні моки повертають null).
+      await expect(
+        service.getProjectForActor(human(), 'proj-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('forbids the org owner — relationship established first, then suspension', async () => {
+      prisma.organizationMembership.findUnique.mockResolvedValue({
+        role: 'owner',
+      });
+
+      await expect(
+        service.getProjectForActor(human(), 'proj-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('hides project existence from a service account of another org (NotFound)', async () => {
+      const svc = human({
+        id: 'svc-1',
+        type: 'service',
+        serviceOrganizationId: 'org-other',
+      });
+      // Навіть якби грант якось збігся — у сервіса з чужої org немає стосунку.
+      prisma.grant.findFirst.mockResolvedValue(grant({ identityId: 'svc-1' }));
+
+      await expect(
+        service.getProjectForActor(svc, 'proj-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('forbids a valid grant holder in a suspended org', async () => {
+      prisma.organizationMembership.findUnique.mockResolvedValue({
+        role: 'member',
+      });
+      prisma.grant.findFirst.mockResolvedValue(grant({ identityId: 'actor-1' }));
+
+      await expect(
+        service.getProjectForActor(human(), 'proj-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('forbids a valid service account in its own suspended org', async () => {
+      const svc = human({
+        id: 'svc-1',
+        type: 'service',
+        serviceOrganizationId: 'org-1',
+      });
+      prisma.grant.findFirst.mockResolvedValue(grant({ identityId: 'svc-1' }));
+
+      await expect(
+        service.getProjectForActor(svc, 'proj-1'),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
