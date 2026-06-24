@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "node --import tsx --test src/*.test.ts"
   },
   "keywords": ["secrets", "cli", "env"],
   "author": "Danylo Ohurtsov",
