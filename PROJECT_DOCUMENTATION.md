@@ -220,6 +220,7 @@ npm run build  # компіляція у dist/
 - `ValidationPipe` з `whitelist`, `forbidNonWhitelisted`, `transform`;
 - `ThrottlerGuard`, default limit `100` запитів на хвилину;
 - `AuthGuard`, який вимагає `Authorization: Bearer ...` для всіх маршрутів, окрім `@Public()`.
+- `helmet` з вузькою Content-Security-Policy та базовими security headers.
 
 ## 8. Модель даних
 
@@ -298,17 +299,23 @@ Organization
 - `canUpdateSecrets`;
 - `canDeleteSecrets`;
 - `canRollbackSecrets`;
-- `canManageGrants` — legacy-поле, в поточній логіці не дає керувати грантами.
+- `canManageGrants` — legacy-поле сумісності; в поточній логіці не дає керувати грантами або проєктом.
 
 Ключовий нюанс безпеки:
 
 - `owner`/`admin` організації може керувати структурою проєкту, оточеннями та грантами;
 - `owner`/`admin` організації не отримує автоматичного доступу до значень секретів;
 - щоб побачити, створити, змінити, видалити або відкотити значення секрету, потрібен явний grant з відповідними дозволами.
+- створення, оновлення і відкликання grant-ів доступні тільки `owner`/`admin` організації;
+- project/environment grant з роллю `admin` дає повний data-plane доступ і `manageProject`, але не дає `manageGrants`.
 
 Це зроблено навмисно: ownership не означає universal secret reveal.
 
 Service account може працювати тільки в межах своєї організації (`serviceOrganizationId`).
+
+`developer` за замовчуванням бачить metadata/list secret keys, але не бачить plaintext values і не може створювати, оновлювати, видаляти або rollback-ати секрети без явних capability-прапорців.
+
+Platform admin (`Identity.isSuperadmin`) — це власник інстансу. Він може виконувати platform-level операції (`/admin/*`), але не отримує автоматичного доступу до tenant secret values і не є обхідним шляхом навколо tenant grants.
 
 ## 11. Шифрування секретів
 
@@ -350,12 +357,15 @@ Content-Type: application/json
 ```http
 POST /signup
 POST /auth/login
+DELETE /auth/session
 GET  /auth/me
 ```
 
 `POST /signup` створює human identity, персональну організацію і owner membership.
 
 `POST /auth/login` повертає `sessionToken`.
+
+`DELETE /auth/session` відкликає поточну browser-сесію. Endpoint працює тільки для `sess_...`; API tokens `sm_...` через нього не відкликаються.
 
 ### Account
 
@@ -427,6 +437,7 @@ Rate limits:
 - список секретів: `60/min`;
 - reveal одного секрету: `30/min`;
 - signup: `5/min`.
+- login: `5/min`.
 
 ### Grants
 
@@ -488,7 +499,30 @@ POST /admin/rotate-keys
 
 Призупинена організація блокує доступ до своїх ресурсів навіть для owner/admin. Розморозити її може platform admin.
 
-## 13. Frontend
+Для користувачів без зв'язку з проєктом backend повертає `404` незалежно від статусу організації. Це не дає стороннім користувачам визначати, чи існує проєкт у призупиненій організації.
+
+## 13. Security headers
+
+Backend застосовує `helmet` до всіх відповідей.
+
+Content-Security-Policy налаштована явно і вузько:
+
+```text
+default-src 'self';
+base-uri 'self';
+object-src 'none';
+frame-ancestors 'none';
+form-action 'self';
+script-src 'self';
+script-src-attr 'none';
+style-src 'self';
+img-src 'self' data:;
+connect-src 'self';
+```
+
+Політика не містить `default-src *` або `unsafe-inline`. `upgrade-insecure-requests` не вмикається, щоб не ламати локальну HTTP-розробку. CORS не розширюється; у dev-режимі frontend ходить до API через Vite proxy.
+
+## 14. Frontend
 
 Frontend — SPA без окремої routing-бібліотеки. Маршрути обробляються у `frontend/src/lib/router.tsx` через History API.
 
@@ -506,13 +540,15 @@ Frontend — SPA без окремої routing-бібліотеки. Маршр�
 - bearer token береться з `localStorage`;
 - помилки API перетворюються на `Error(message)`.
 
+Logout для browser-сесії викликає `DELETE /auth/session`, а потім очищає `localStorage`. Якщо revoke-запит не вдався, frontend все одно очищає локальний стан; backend залишається джерелом істини для `revokedAt`.
+
 Vite proxy:
 
 ```text
 /api/* -> http://localhost:3000/*
 ```
 
-## 14. CLI
+## 15. CLI
 
 CLI пакет називається `@secrets-manager/cli`, binary — `secrets`.
 
@@ -539,6 +575,8 @@ secrets run -e <environmentId> -- <command...>
 
 Файл створюється з правами `0600`.
 
+Після кожного запису CLI явно застосовує `chmod 0600`, тому файл звужується до безпечних прав навіть якщо він уже існував із ширшими permissions.
+
 Приклад запуску команди з секретами:
 
 ```bash
@@ -554,7 +592,9 @@ GET /environments/:environmentId/secrets?reveal=true
 
 Потім додає кожну пару `{ key, value }` в environment дочірнього процесу і повертає exit code цього процесу.
 
-## 15. Тести
+Якщо API повертає `value: null` для секрету без права reveal, CLI не інжектить рядок `"null"` або `"undefined"` у process env. Такі секрети пропускаються, а в `stderr` друкується коротке попередження без значень секретів.
+
+## 16. Тести
 
 Unit-тести backend:
 
@@ -586,7 +626,7 @@ cd cli
 npm run build
 ```
 
-## 16. Аудит
+## 17. Аудит
 
 Backend пише `AuditLog` для важливих дій:
 
@@ -600,7 +640,18 @@ Backend пише `AuditLog` для важливих дій:
 
 Reveal секретів логуються окремо від звичайного перегляду списку.
 
-## 17. Типовий сценарій роботи
+Є два режими аудиту:
+
+- `logRequired` — fail-closed: якщо audit row не записався, дія завершується помилкою `503 Audit log unavailable`;
+- `logBestEffort` — best-effort: помилка audit запису логується на сервері, але не ламає запит.
+
+Fail-closed використовується для security-critical дій: reveal секретів, зміни секретів, grant CRUD, token issue/revoke, service account дії, membership/ownership зміни, project/environment мутації та platform-admin мутації. Для більшості критичних мутацій audit write виконується в тій самій Prisma transaction, що й сама мутація, тому audit failure rollback-ає зміну.
+
+`secret.reveal` аудиться до decrypt/return. Якщо audit недоступний, plaintext secret value не дешифрується і не повертається.
+
+`secret.list` лишається best-effort, бо це read-only metadata без plaintext values.
+
+## 18. Типовий сценарій роботи
 
 1. Superadmin створюється через `src/bootstrap.ts`.
 2. Користувач реєструється через `/signup` і отримує personal workspace.
@@ -612,16 +663,19 @@ Reveal секретів логуються окремо від звичайно�
 8. Користувачі з відповідними grants створюють, оновлюють або reveal-ять секрети.
 9. CLI використовує service account token для запуску процесів із секретами в environment.
 
-## 18. Безпекові правила проєкту
+## 19. Безпекові правила проєкту
 
 - Не комітити `.env`, реальні токени, master keys або дампи БД.
 - Не видаляти старі master keys без повної ротації та перевірки даних.
 - Для automation/CI краще використовувати service account token, а не human token.
 - Видавати `revealSecrets` тільки тим identity, які реально мають бачити plaintext.
+- Не використовувати `canManageGrants` як робочий дозвіл. Керування доступом у MVP — тільки через org `owner`/`admin`.
 - Для production мати окремі Postgres/Redis і окремий набір master keys.
 - При відкликанні токена backend інвалідовує Redis cache, тому токен має перестати працювати одразу.
+- Browser logout відкликає server-side session. Якщо сесію вкрадено, потрібен revoke на сервері, а не лише очищення localStorage.
+- Critical audit failures мають блокувати security-sensitive дії; не можна віддавати plaintext secret без audit record.
 
-## 19. Troubleshooting
+## 20. Troubleshooting
 
 Backend падає з `MASTER_KEYS is not configured`:
 

@@ -220,6 +220,7 @@ Global behavior:
 - `ValidationPipe` with `whitelist`, `forbidNonWhitelisted`, and `transform`;
 - `ThrottlerGuard`, default limit `100` requests per minute;
 - `AuthGuard`, which requires `Authorization: Bearer ...` for every route except `@Public()` routes.
+- `helmet` with a narrow Content-Security-Policy and baseline security headers.
 
 ## 8. Data Model
 
@@ -298,17 +299,23 @@ Additional capability flags:
 - `canUpdateSecrets`;
 - `canDeleteSecrets`;
 - `canRollbackSecrets`;
-- `canManageGrants` - legacy field; in the current authorization logic it does not allow managing grants.
+- `canManageGrants` - legacy compatibility field; in the current authorization logic it does not allow managing grants or projects.
 
 Important security rule:
 
 - an organization `owner`/`admin` can manage project structure, environments, and grants;
 - an organization `owner`/`admin` does not automatically get access to secret values;
 - revealing, creating, updating, deleting, or rolling back secret values requires an explicit grant with the required permissions.
+- creating, updating, and revoking grants is available only to organization `owner`/`admin` members;
+- a project/environment grant with role `admin` grants full data-plane access and `manageProject`, but it does not grant `manageGrants`.
 
 This is intentional: ownership does not imply universal secret reveal.
 
 A service account can work only inside its own organization (`serviceOrganizationId`).
+
+By default, `developer` can see metadata/list secret keys, but cannot see plaintext values and cannot create, update, delete, or roll back secrets without explicit capability flags.
+
+Platform admin (`Identity.isSuperadmin`) is the instance owner. It can perform platform-level operations (`/admin/*`), but it does not automatically get tenant secret values and is not a bypass around tenant grants.
 
 ## 11. Secret Encryption
 
@@ -350,12 +357,15 @@ Content-Type: application/json
 ```http
 POST /signup
 POST /auth/login
+DELETE /auth/session
 GET  /auth/me
 ```
 
 `POST /signup` creates a human identity, a personal organization, and an owner membership.
 
 `POST /auth/login` returns `sessionToken`.
+
+`DELETE /auth/session` revokes the current browser session. The endpoint is session-only for `sess_...`; API tokens `sm_...` are not revoked through it.
 
 ### Account
 
@@ -427,6 +437,7 @@ Rate limits:
 - secrets list: `60/min`;
 - reveal a single secret: `30/min`;
 - signup: `5/min`.
+- login: `5/min`.
 
 ### Grants
 
@@ -488,7 +499,30 @@ POST /admin/rotate-keys
 
 A suspended organization blocks access to its resources even for owner/admin members. Only a platform admin can unsuspend it.
 
-## 13. Frontend
+For users with no relationship to a project, the backend returns `404` regardless of the organization's status. This prevents outsiders from inferring that a project exists inside a suspended organization.
+
+## 13. Security Headers
+
+The backend applies `helmet` to every response.
+
+Content-Security-Policy is explicit and narrow:
+
+```text
+default-src 'self';
+base-uri 'self';
+object-src 'none';
+frame-ancestors 'none';
+form-action 'self';
+script-src 'self';
+script-src-attr 'none';
+style-src 'self';
+img-src 'self' data:;
+connect-src 'self';
+```
+
+The policy does not include `default-src *` or `unsafe-inline`. `upgrade-insecure-requests` is intentionally not enabled so local HTTP development keeps working. CORS is not expanded; in development the frontend reaches the API through the Vite proxy.
+
+## 14. Frontend
 
 The frontend is an SPA without a separate routing library. Routes are handled in `frontend/src/lib/router.tsx` through the History API.
 
@@ -506,13 +540,15 @@ API requests go through `frontend/src/lib/api.ts`:
 - bearer token is read from `localStorage`;
 - API errors are converted to `Error(message)`.
 
+Browser-session logout calls `DELETE /auth/session` and then clears `localStorage`. If the revoke request fails, the frontend still clears local state; the backend remains the source of truth for `revokedAt`.
+
 Vite proxy:
 
 ```text
 /api/* -> http://localhost:3000/*
 ```
 
-## 14. CLI
+## 15. CLI
 
 The CLI package is named `@secrets-manager/cli`, and the binary is `secrets`.
 
@@ -539,6 +575,8 @@ CLI configuration:
 
 The file is created with `0600` permissions.
 
+After every write, the CLI explicitly applies `chmod 0600`, so the file is tightened to safe permissions even if it already existed with broader permissions.
+
 Example command with injected secrets:
 
 ```bash
@@ -554,7 +592,9 @@ GET /environments/:environmentId/secrets?reveal=true
 
 Then it adds each `{ key, value }` pair to the child process environment and returns that process exit code.
 
-## 15. Tests
+If the API returns `value: null` for a secret without reveal permission, the CLI does not inject the string `"null"` or `"undefined"` into the process env. Those secrets are skipped, and a short warning is printed to `stderr` without secret values.
+
+## 16. Tests
 
 Backend unit tests:
 
@@ -586,7 +626,7 @@ cd cli
 npm run build
 ```
 
-## 16. Audit
+## 17. Audit
 
 The backend writes `AuditLog` rows for important actions:
 
@@ -600,7 +640,18 @@ The backend writes `AuditLog` rows for important actions:
 
 Secret reveal is logged separately from ordinary list operations.
 
-## 17. Typical Workflow
+There are two audit modes:
+
+- `logRequired` - fail-closed: if the audit row cannot be written, the action fails with `503 Audit log unavailable`;
+- `logBestEffort` - best-effort: the audit write error is logged server-side, but the request is not failed.
+
+Fail-closed audit is used for security-critical actions: secret reveal, secret mutations, grant CRUD, token issue/revoke, service account actions, membership/ownership changes, project/environment mutations, and platform-admin mutations. For most critical mutations, the audit write runs in the same Prisma transaction as the mutation, so audit failure rolls back the change.
+
+`secret.reveal` is audited before decrypt/return. If audit is unavailable, plaintext secret values are not decrypted or returned.
+
+`secret.list` remains best-effort because it is read-only metadata without plaintext values.
+
+## 18. Typical Workflow
 
 1. Superadmin is created through `src/bootstrap.ts`.
 2. A user signs up through `/signup` and receives a personal workspace.
@@ -612,16 +663,19 @@ Secret reveal is logged separately from ordinary list operations.
 8. Users with matching grants create, update, or reveal secrets.
 9. The CLI uses a service account token to run processes with secrets from an environment.
 
-## 18. Security Rules
+## 19. Security Rules
 
 - Do not commit `.env`, real tokens, master keys, or database dumps.
 - Do not remove old master keys without full rotation and data verification.
 - Use a service account token for automation/CI instead of a human token.
 - Grant `revealSecrets` only to identities that truly need plaintext access.
+- Do not use `canManageGrants` as an effective permission. In the MVP, access management is only for organization `owner`/`admin` members.
 - Use separate PostgreSQL/Redis instances and a separate master key set in production.
 - When a token is revoked, the backend invalidates Redis cache, so the token should stop working immediately.
+- Browser logout revokes the server-side session. If a session is stolen, server-side revocation is required; clearing localStorage alone is not enough.
+- Critical audit failures must block security-sensitive actions; plaintext secrets must not be returned without an audit record.
 
-## 19. Troubleshooting
+## 20. Troubleshooting
 
 Backend fails with `MASTER_KEYS is not configured`:
 
@@ -655,4 +709,3 @@ A user can see a project but cannot reveal secrets:
 
 - this is the expected security model;
 - issue a grant with `reader`, `readonly`, `admin`, or `canRevealSecrets=true`.
-
