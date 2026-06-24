@@ -65,9 +65,12 @@ program
     // 1. Тягнемо секрети з API
     let secrets: Array<{ key: string; value: string }>;
     try {
-      const res = await fetch(`${apiUrl}/environments/${opts.env}/secrets`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${apiUrl}/environments/${opts.env}/secrets?reveal=true`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       if (!res.ok) {
         console.error(`✗ Failed to fetch secrets (status ${res.status})`);
         process.exit(1);
