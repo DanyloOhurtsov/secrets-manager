@@ -5,3 +5,9 @@ export class CreateEnvironmentDto {
   @IsNotEmpty()
   name: string;
 }
+
+export class UpdateEnvironmentDto {
+  @IsString()
+  @IsNotEmpty()
+  name: string;
+}

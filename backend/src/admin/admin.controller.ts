@@ -1,19 +1,9 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Delete,
-  Body,
-  Param,
-  UseGuards,
-  Query,
-} from '@nestjs/common';
+import { Controller, Get, Post, Param, UseGuards, Query } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { RotationService } from './rotation.service';
 import { SuperadminGuard } from '../auth/superadmin.guard';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
-import { CreateIdentityDto, IssueTokenDto, CreateGrantDto } from './dto';
-import { parseQueryList } from './audit-query';
+import { parseQueryDate, parseQueryList } from './audit-query';
 
 @Controller('admin')
 @UseGuards(SuperadminGuard)
@@ -23,90 +13,49 @@ export class AdminController {
     private readonly rotation: RotationService,
   ) {}
 
-  @Post('identities')
-  createIdentity(
+  // --- Organizations (platform view: metadata + suspension, never secrets) ---
+  @Get('organizations')
+  listOrganizations() {
+    return this.admin.listOrganizations();
+  }
+
+  @Post('organizations/:id/suspend')
+  suspendOrganization(
     @CurrentIdentity() actor: { id: string },
-    @Body() body: CreateIdentityDto,
+    @Param('id') id: string,
   ) {
-    return this.admin.createIdentity(actor.id, body.name, body.type);
+    return this.admin.setOrganizationStatus(actor.id, id, 'suspended');
   }
 
-  @Get('identities')
-  listIdentities() {
-    return this.admin.listIdentities();
-  }
-
-  @Post('identities/:identityId/tokens')
-  issueToken(
+  @Post('organizations/:id/unsuspend')
+  unsuspendOrganization(
     @CurrentIdentity() actor: { id: string },
-    @Param('identityId') identityId: string,
-    @Body() body: IssueTokenDto,
+    @Param('id') id: string,
   ) {
-    return this.admin.issueToken(actor.id, identityId, body.label);
+    return this.admin.setOrganizationStatus(actor.id, id, 'active');
   }
 
-  @Get('identities/:identityId/tokens')
-  listTokens(@Param('identityId') identityId: string) {
-    return this.admin.listTokens(identityId);
-  }
-
-  @Delete('tokens/:tokenId')
-  revokeToken(
-    @CurrentIdentity() actor: { id: string },
-    @Param('tokenId') tokenId: string,
-  ) {
-    return this.admin.revokeToken(actor.id, tokenId);
-  }
-
-  @Post('identities/:identityId/grants')
-  createGrant(
-    @CurrentIdentity() actor: { id: string },
-    @Param('identityId') identityId: string,
-    @Body() body: CreateGrantDto,
-  ) {
-    return this.admin.createGrant(
-      actor.id,
-      identityId,
-      body.projectId,
-      body.role,
-      body.environment,
-      {
-        canRevealSecrets: body.canRevealSecrets,
-        canCreateSecrets: body.canCreateSecrets,
-        canUpdateSecrets: body.canUpdateSecrets,
-        canDeleteSecrets: body.canDeleteSecrets,
-        canRollbackSecrets: body.canRollbackSecrets,
-        canManageGrants: body.canManageGrants,
-      },
-    );
-  }
-
-  @Get('identities/:identityId/grants')
-  listGrants(@Param('identityId') identityId: string) {
-    return this.admin.listGrants(identityId);
-  }
-
-  @Delete('grants/:grantId')
-  revokeGrant(
-    @CurrentIdentity() actor: { id: string },
-    @Param('grantId') grantId: string,
-  ) {
-    return this.admin.revokeGrant(actor.id, grantId);
-  }
-
-  // --- Audit ---
+  // --- Global audit ---
   @Get('audit')
   listAuditLog(
     @Query('action') action?: string | string[],
     @Query('organizationId') organizationId?: string,
     @Query('projectId') projectId?: string,
     @Query('environmentId') environmentId?: string,
+    @Query('actorId') actorId?: string,
+    @Query('targetType') targetType?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     return this.admin.listAuditLog(100, {
       actions: parseQueryList(action),
       organizationId,
       projectId,
       environmentId,
+      actorId,
+      targetType,
+      from: parseQueryDate(from),
+      to: parseQueryDate(to),
     });
   }
 
@@ -123,7 +72,12 @@ export class AdminController {
     });
   }
 
-  // --- Key rotation ---
+  // --- System ---
+  @Get('health')
+  health() {
+    return this.admin.health();
+  }
+
   @Post('rotate-keys')
   rotateKeys(@CurrentIdentity() actor: { id: string }) {
     return this.rotation.rotate(actor.id);

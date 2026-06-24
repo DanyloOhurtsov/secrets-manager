@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Delete, Body, Param } from '@nestjs/common';
 import { ProjectsService } from './projects.service';
-import { CreateProjectDto } from './dto';
+import { CreateProjectDto, TransferProjectDto } from './dto';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
 import type { AuthPrincipal } from '../auth/auth.types';
 
@@ -24,6 +24,23 @@ export class ProjectsController {
   @Get(':id')
   findOne(@CurrentIdentity() actor: AuthPrincipal, @Param('id') id: string) {
     return this.projectsService.findOne(actor, id);
+  }
+
+  @Get(':id/capabilities')
+  capabilities(
+    @CurrentIdentity() actor: AuthPrincipal,
+    @Param('id') id: string,
+  ) {
+    return this.projectsService.capabilities(actor, id);
+  }
+
+  @Post(':id/transfer')
+  transfer(
+    @CurrentIdentity() actor: AuthPrincipal,
+    @Param('id') id: string,
+    @Body() body: TransferProjectDto,
+  ) {
+    return this.projectsService.transfer(actor, id, body.targetOrganizationId);
   }
 
   @Delete(':id')

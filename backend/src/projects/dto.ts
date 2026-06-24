@@ -9,3 +9,9 @@ export class CreateProjectDto {
   @IsOptional()
   organizationId?: string;
 }
+
+export class TransferProjectDto {
+  @IsString()
+  @IsNotEmpty()
+  targetOrganizationId: string;
+}

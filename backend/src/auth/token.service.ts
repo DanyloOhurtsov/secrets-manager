@@ -26,12 +26,16 @@ export class TokenService {
     return `token:${tokenHash}`;
   }
 
-  async issue(identityId: string, label?: string): Promise<string> {
+  async issue(
+    identityId: string,
+    label?: string,
+    expiresAt?: Date | null,
+  ): Promise<string> {
     const token = TOKEN_PREFIX + randomBytes(TOKEN_BYTES).toString('hex');
     const tokenHash = this.hash(token);
 
     await this.prisma.token.create({
-      data: { identityId, tokenHash, label },
+      data: { identityId, tokenHash, label, expiresAt: expiresAt ?? null },
     });
 
     return token;
@@ -68,7 +72,29 @@ export class TokenService {
     // 3. Кладемо в кеш із коротким TTL (страховка на випадок збою інвалідації)
     await this.cache.set(key, identity, CACHE_TTL_SECONDS);
 
+    // 4. Best-effort відмітка останнього використання. Робимо лише на кеш-промах
+    //    (раз на TTL), щоб не бити БД на кожен запит; помилку ковтаємо.
+    void this.prisma.token
+      .update({ where: { tokenHash }, data: { lastUsedAt: new Date() } })
+      .catch(() => undefined);
+
     return identity;
+  }
+
+  /**
+   * Видаляє всі токени identity (hard delete) + інвалідує їхній кеш.
+   * Потрібно для видалення service-акаунтів: FK на Token — RESTRICT,
+   * тож identity не видалити, поки лишилися токени.
+   */
+  async deleteAllForIdentity(identityId: string): Promise<void> {
+    const tokens = await this.prisma.token.findMany({
+      where: { identityId },
+      select: { tokenHash: true },
+    });
+    await this.prisma.token.deleteMany({ where: { identityId } });
+    await Promise.all(
+      tokens.map((t) => this.cache.del(this.cacheKey(t.tokenHash))),
+    );
   }
 
   /** Відкликає токен (м'яко) + миттєво інвалідує кеш. */

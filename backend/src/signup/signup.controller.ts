@@ -10,7 +10,7 @@ export class SignupController {
 
   @Post()
   @Public()
-  @Throttle({ strict: { limit: 5, ttl: 60000 } })
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   signup(@Body() body: SignupDto) {
     return this.signupService.signup(body.name, body.email, body.password);
   }

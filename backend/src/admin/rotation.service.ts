@@ -21,6 +21,14 @@ export class RotationService {
   async rotate(actorId: string) {
     const activeVersion = this.keyProvider.getActiveVersion();
 
+    await this.audit.log({
+      actorId,
+      action: 'key_rotation.start',
+      targetType: 'system',
+      targetId: activeVersion,
+      metadata: { toVersion: activeVersion },
+    });
+
     // беремо лише ті, що не на активній версії
     const versions = await this.prisma.secretVersion.findMany({
       where: { keyVersion: { not: activeVersion } },

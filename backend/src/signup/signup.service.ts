@@ -79,6 +79,16 @@ export class SignupService {
       metadata: { email: normalizedEmail },
     });
 
+    // Кожне створення організації має слід в audit — включно з personal workspace.
+    await this.audit.log({
+      actorId: identity.id,
+      organizationId: organization.id,
+      action: 'organization.create',
+      targetType: 'organization',
+      targetId: organization.id,
+      metadata: { name: organization.name, type: organization.type },
+    });
+
     return {
       sessionToken,
       identity: {

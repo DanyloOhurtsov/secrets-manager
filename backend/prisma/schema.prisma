@@ -43,6 +43,7 @@ model Secret {
   createdById      String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
 
   environment    Environment     @relation(fields: [environmentId], references: [id])
   currentVersion SecretVersion?  @relation("CurrentSecretVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
@@ -83,6 +84,7 @@ model Identity {
   type                  String // "human" | "service"
   isSuperadmin          Boolean  @default(false)
   serviceOrganizationId String?
+  lastActiveOrgId       String?
   createdAt             DateTime @default(now())
 
   tokens              Token[]
@@ -129,6 +131,7 @@ model Token {
   createdAt  DateTime  @default(now())
   expiresAt  DateTime?
   revokedAt  DateTime?
+  lastUsedAt DateTime?
 
   identity Identity @relation(fields: [identityId], references: [id])
 

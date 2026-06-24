@@ -27,7 +27,7 @@ export interface RewrappedDataKey {
 function toBytes(input: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(input.length);
   out.set(input);
-  return out as Uint8Array<ArrayBuffer>;
+  return out;
 }
 
 @Injectable()
