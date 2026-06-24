@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentIdentity } from './current-identity.decorator';
 import { Public } from './public.decorator';
 import { AuthService } from './auth.service';
@@ -18,8 +19,13 @@ interface Identity {
 export class AuthController {
   constructor(private auth: AuthService) {}
 
+  // Логін — найризикованіший публічний маршрут (brute force / credential
+  // stuffing). Тримаємо жорсткий ліміт, як на signup: 5 спроб/60с на IP.
+  // ThrottlerGuard рахує КОЖЕН запит (і вдалий, і невдалий) до обробника, тож
+  // ліміт спрацьовує однаково для правильних і неправильних паролів.
   @Post('login')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   login(@Body() body: LoginDto) {
     return this.auth.login(body.email, body.password);
   }
