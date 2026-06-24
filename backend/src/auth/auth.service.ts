@@ -25,6 +25,11 @@ export class AuthService {
     });
 
     if (!identity || identity.type !== 'human' || !identity.passwordHash) {
+      // Акаунта немає (або це не human / без пароля): виконуємо еквівалентну
+      // роботу хешування проти фейкового хеша, щоб час відповіді збігався з
+      // випадком «акаунт є, але пароль невірний». Захист від енумерації
+      // користувачів за таймінгом (L2). Помилка — та сама дженерик-відповідь.
+      await this.passwords.verifyAgainstDummyHash(password);
       throw new UnauthorizedException('Invalid email or password');
     }
 

@@ -30,6 +30,12 @@ export class SignupService {
       where: { email: normalizedEmail },
       select: { id: true },
     });
+    // ACCEPTED UX TRADEOFF (L2): an explicit 409 here discloses that an email is
+    // already registered, i.e. it is an account-enumeration vector. We keep it for
+    // now because a clear "this email is taken" message is important signup UX and
+    // the login path (the high-volume enumeration target) is already hardened
+    // against timing leaks. Revisit if signup enumeration becomes a real concern
+    // (e.g. switch to "check your inbox to verify" + email-based de-dup).
     if (existing) throw new ConflictException('Email is already registered');
 
     const passwordHash = await this.passwords.hash(password);
