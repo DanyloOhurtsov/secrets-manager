@@ -48,6 +48,20 @@ export class SessionService {
       isSuperadmin: record.identity.isSuperadmin,
       serviceOrganizationId: record.identity.serviceOrganizationId,
       authMethod: 'session',
+      sessionId: record.id,
     };
+  }
+
+  /**
+   * М'яко відкликає сесію (logout): виставляє revokedAt. Сесії не кешуються, тож
+   * наступний verify одразу побачить revokedAt і поверне null → 401.
+   * updateMany (а не update) робить операцію ідемпотентною: повторний logout або
+   * вже відкликана/неіснуюча сесія не кидають помилку.
+   */
+  async revoke(sessionId: string): Promise<void> {
+    await this.prisma.session.updateMany({
+      where: { id: sessionId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
   }
 }

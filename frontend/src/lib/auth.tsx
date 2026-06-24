@@ -24,7 +24,7 @@ interface AuthContextValue {
   loginWithToken: (token: string) => Promise<void>;
   loginWithPassword: (email: string, password: string) => Promise<void>;
   signup: (name: string, email: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -82,9 +82,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIdentity(res.identity);
   }
 
-  function logout() {
-    clearToken();
-    setIdentity(null);
+  async function logout() {
+    // Browser-сесію відкликаємо на бекенді (M2), щоб вкрадений sess_-токен не
+    // лишався валідним до кінця TTL. Спершу revoke (поки токен ще в localStorage),
+    // потім чистимо локально. Помилку ковтаємо — локальний logout робимо завжди;
+    // бекенд усе одно відхилятиме сесію, якщо її таки відкликали.
+    try {
+      if (identity?.authMethod === 'session') {
+        await api('/auth/session', { method: 'DELETE' });
+      }
+    } catch {
+      // ignore — clear local state regardless of revoke outcome
+    } finally {
+      clearToken();
+      setIdentity(null);
+    }
   }
 
   return (

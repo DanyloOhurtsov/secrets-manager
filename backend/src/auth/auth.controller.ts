@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Post } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { CurrentIdentity } from './current-identity.decorator';
 import { Public } from './public.decorator';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto';
+import type { AuthPrincipal } from './auth.types';
 
 interface Identity {
   id: string;
@@ -30,8 +31,25 @@ export class AuthController {
     return this.auth.login(body.email, body.password);
   }
 
+  // Відкликає поточну browser-сесію (logout). Session-only: для API-токенів
+  // AuthService.logout кидає 400 і токен НЕ чіпає. Працює лише з валідним
+  // bearer (глобальний AuthGuard), тож відкликати чужу сесію не можна.
+  @Delete('session')
+  logout(@CurrentIdentity() identity: AuthPrincipal) {
+    return this.auth.logout(identity);
+  }
+
   @Get('me')
-  me(@CurrentIdentity() identity: Identity): Identity {
-    return identity;
+  me(@CurrentIdentity() identity: AuthPrincipal): Identity {
+    // Назовні віддаємо лише публічні поля — внутрішній sessionId не світимо.
+    return {
+      id: identity.id,
+      name: identity.name,
+      email: identity.email,
+      type: identity.type,
+      isSuperadmin: identity.isSuperadmin,
+      serviceOrganizationId: identity.serviceOrganizationId,
+      authMethod: identity.authMethod,
+    };
   }
 }
