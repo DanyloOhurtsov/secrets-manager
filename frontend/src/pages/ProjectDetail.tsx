@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
-import type { Project } from '@/lib/projects';
+import {
+  getProjectCapabilities,
+  type Project,
+  type ProjectCapabilities,
+} from '@/lib/projects';
 import { useSecrets } from '@/lib/secrets-context';
+import { notifyError } from '@/lib/errors';
 import { SecretsTable } from './SecretsTable';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,23 +31,41 @@ export function ProjectDetail({
     getEnvironments,
     loadEnvironments,
     createEnvironment,
+    renameEnvironment,
     getSecrets,
     loadSecrets,
+    getCapabilities,
+    loadCapabilities,
     createSecret,
+    updateSecret,
+    rollbackSecret,
+    loadVersions,
+    revealSecret,
     deleteSecret,
   } = useSecrets();
 
   const environments = getEnvironments(project.id);
   const [activeEnvId, setActiveEnvId] = useState<string | null>(null);
-  const [error, setError] = useState('');
+  const [projectCaps, setProjectCaps] = useState<ProjectCapabilities | null>(
+    null,
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [newEnvName, setNewEnvName] = useState('');
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameName, setRenameName] = useState('');
 
-  // Завантажуємо оточення при першому відкритті проєкту (кеш живе глобально).
+  const activeEnv = environments?.find((e) => e.id === activeEnvId);
+
+  // Створення оточення вимагає manageProject на рівні проєкту — без цього дозволу
+  // ховаємо кнопку "New environment".
+  const canManageProject = !!projectCaps?.manageProject;
+
+  // Завантажуємо оточення та дозволи проєкту при першому відкритті (кеш глобальний).
   useEffect(() => {
-    loadEnvironments(project.id).catch((err) =>
-      setError(err instanceof Error ? err.message : 'Failed to load'),
-    );
+    loadEnvironments(project.id).catch(notifyError);
+    getProjectCapabilities(project.id)
+      .then(setProjectCaps)
+      .catch(() => setProjectCaps(null));
   }, [project.id, loadEnvironments]);
 
   // Виставляємо активне оточення, коли список з'явився.
@@ -52,14 +75,15 @@ export function ProjectDetail({
     }
   }, [environments, activeEnvId]);
 
-  // Лінива загрузка секретів активного оточення (раз).
+  // Лінива загрузка секретів та дозволів активного оточення (раз).
   useEffect(() => {
     if (activeEnvId) {
-      loadSecrets(activeEnvId).catch((err) =>
-        setError(err instanceof Error ? err.message : 'Failed to load secrets'),
-      );
+      loadSecrets(activeEnvId).catch(notifyError);
+      loadCapabilities(activeEnvId).catch(() => {
+        /* без дозволів просто ховаємо кнопки дій — не блокуємо перегляд */
+      });
     }
-  }, [activeEnvId, loadSecrets]);
+  }, [activeEnvId, loadSecrets, loadCapabilities]);
 
   async function handleCreateEnv() {
     try {
@@ -68,7 +92,23 @@ export function ProjectDetail({
       setDialogOpen(false);
       setActiveEnvId(created.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create');
+      notifyError(err);
+    }
+  }
+
+  function openRename() {
+    if (!activeEnv) return;
+    setRenameName(activeEnv.name);
+    setRenameOpen(true);
+  }
+
+  async function handleRenameEnv() {
+    if (!activeEnvId) return;
+    try {
+      await renameEnvironment(project.id, activeEnvId, renameName.trim());
+      setRenameOpen(false);
+    } catch (err) {
+      notifyError(err);
     }
   }
 
@@ -81,8 +121,6 @@ export function ProjectDetail({
         <h2 className="text-xl font-semibold">{project.name}</h2>
       </div>
 
-      {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
-
       {environments === undefined && (
         <p className="text-muted-foreground">Loading...</p>
       )}
@@ -90,13 +128,15 @@ export function ProjectDetail({
       {environments && environments.length === 0 && (
         <div className="flex flex-col items-start gap-4">
           <p className="text-muted-foreground">No environments yet.</p>
-          <CreateEnvDialog
-            open={dialogOpen}
-            onOpenChange={setDialogOpen}
-            name={newEnvName}
-            onName={setNewEnvName}
-            onCreate={handleCreateEnv}
-          />
+          {canManageProject && (
+            <CreateEnvDialog
+              open={dialogOpen}
+              onOpenChange={setDialogOpen}
+              name={newEnvName}
+              onName={setNewEnvName}
+              onCreate={handleCreateEnv}
+            />
+          )}
         </div>
       )}
 
@@ -110,25 +150,47 @@ export function ProjectDetail({
                 </TabsTrigger>
               ))}
             </TabsList>
-            <CreateEnvDialog
-              open={dialogOpen}
-              onOpenChange={setDialogOpen}
-              name={newEnvName}
-              onName={setNewEnvName}
-              onCreate={handleCreateEnv}
-            />
+            {canManageProject && (
+              <div className="flex items-center gap-2">
+                <Button variant="ghost" onClick={openRename}>
+                  Rename
+                </Button>
+                <CreateEnvDialog
+                  open={dialogOpen}
+                  onOpenChange={setDialogOpen}
+                  name={newEnvName}
+                  onName={setNewEnvName}
+                  onCreate={handleCreateEnv}
+                />
+              </div>
+            )}
           </div>
           {environments.map((env) => (
             <TabsContent key={env.id} value={env.id}>
               <SecretsTable
                 secrets={getSecrets(env.id)}
+                capabilities={getCapabilities(env.id)}
                 onAdd={(key, value) => createSecret(env.id, key, value)}
+                onUpdate={(id, value) => updateSecret(env.id, id, value)}
+                onRollback={(id, toVersion) =>
+                  rollbackSecret(env.id, id, toVersion)
+                }
+                onLoadVersions={(id) => loadVersions(env.id, id)}
+                onReveal={(id) => revealSecret(env.id, id)}
                 onDelete={(id) => deleteSecret(env.id, id)}
               />
             </TabsContent>
           ))}
         </Tabs>
       )}
+
+      <RenameEnvDialog
+        open={renameOpen}
+        onOpenChange={setRenameOpen}
+        name={renameName}
+        onName={setRenameName}
+        onRename={handleRenameEnv}
+      />
     </div>
   );
 }
@@ -168,6 +230,45 @@ function CreateEnvDialog({
         <DialogFooter>
           <Button onClick={onCreate} disabled={!name.trim()}>
             Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RenameEnvDialog({
+  open,
+  onOpenChange,
+  name,
+  onName,
+  onRename,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  name: string;
+  onName: (v: string) => void;
+  onRename: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename environment</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="renameenvname">Name</Label>
+          <Input
+            id="renameenvname"
+            value={name}
+            onChange={(e) => onName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && onRename()}
+            placeholder="dev / staging / prod"
+          />
+        </div>
+        <DialogFooter>
+          <Button onClick={onRename} disabled={!name.trim()}>
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -9,10 +9,18 @@ import {
 import {
   listEnvironments as apiListEnvs,
   createEnvironment as apiCreateEnv,
+  renameEnvironment as apiRenameEnv,
   listSecrets as apiListSecrets,
+  getEnvironmentCapabilities as apiGetCapabilities,
   createSecret as apiCreateSecret,
+  updateSecret as apiUpdateSecret,
+  rollbackSecret as apiRollbackSecret,
+  listSecretVersions as apiListVersions,
+  revealSecret as apiRevealSecret,
   deleteSecret as apiDeleteSecret,
   type Secret,
+  type SecretVersion,
+  type EnvironmentCapabilities,
 } from './secrets';
 import type { Environment } from './projects';
 
@@ -20,9 +28,20 @@ interface SecretsContextValue {
   getEnvironments: (projectId: string) => Environment[] | undefined;
   loadEnvironments: (projectId: string) => Promise<Environment[]>;
   createEnvironment: (projectId: string, name: string) => Promise<Environment>;
+  renameEnvironment: (
+    projectId: string,
+    envId: string,
+    name: string,
+  ) => Promise<Environment>;
   getSecrets: (envId: string) => Secret[] | undefined;
   loadSecrets: (envId: string) => Promise<void>;
+  getCapabilities: (envId: string) => EnvironmentCapabilities | undefined;
+  loadCapabilities: (envId: string) => Promise<void>;
   createSecret: (envId: string, key: string, value: string) => Promise<void>;
+  updateSecret: (envId: string, id: string, value: string) => Promise<void>;
+  rollbackSecret: (envId: string, id: string, toVersion: number) => Promise<void>;
+  loadVersions: (envId: string, id: string) => Promise<SecretVersion[]>;
+  revealSecret: (envId: string, id: string) => Promise<string | null>;
   deleteSecret: (envId: string, id: string) => Promise<void>;
 }
 
@@ -31,6 +50,9 @@ const SecretsContext = createContext<SecretsContextValue | null>(null);
 export function SecretsProvider({ children }: { children: ReactNode }) {
   const [envsByProject, setEnvsByProject] = useState<Record<string, Environment[]>>({});
   const [secretsByEnv, setSecretsByEnv] = useState<Record<string, Secret[]>>({});
+  const [capsByEnv, setCapsByEnv] = useState<
+    Record<string, EnvironmentCapabilities>
+  >({});
   // щоб не робити паралельні запити того самого
   const inflight = useRef<Set<string>>(new Set());
 
@@ -63,6 +85,20 @@ export function SecretsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const renameEnvironment = useCallback(
+    async (projectId: string, envId: string, name: string) => {
+      const updated = await apiRenameEnv(projectId, envId, name);
+      setEnvsByProject((prev) => ({
+        ...prev,
+        [projectId]: (prev[projectId] ?? []).map((e) =>
+          e.id === envId ? updated : e,
+        ),
+      }));
+      return updated;
+    },
+    [],
+  );
+
   const getSecrets = useCallback(
     (envId: string) => secretsByEnv[envId],
     [secretsByEnv],
@@ -81,6 +117,27 @@ export function SecretsProvider({ children }: { children: ReactNode }) {
     }
   }, [secretsByEnv]);
 
+  const getCapabilities = useCallback(
+    (envId: string) => capsByEnv[envId],
+    [capsByEnv],
+  );
+
+  const loadCapabilities = useCallback(
+    async (envId: string) => {
+      if (capsByEnv[envId]) return;
+      const key = `caps:${envId}`;
+      if (inflight.current.has(key)) return;
+      inflight.current.add(key);
+      try {
+        const caps = await apiGetCapabilities(envId);
+        setCapsByEnv((prev) => ({ ...prev, [envId]: caps }));
+      } finally {
+        inflight.current.delete(key);
+      }
+    },
+    [capsByEnv],
+  );
+
   const createSecret = useCallback(
     async (envId: string, key: string, value: string) => {
       await apiCreateSecret(envId, key, value);
@@ -90,13 +147,46 @@ export function SecretsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const refresh = useCallback(async (envId: string) => {
+    const secrets = await apiListSecrets(envId);
+    setSecretsByEnv((prev) => ({ ...prev, [envId]: secrets }));
+  }, []);
+
+  const updateSecret = useCallback(
+    async (envId: string, id: string, value: string) => {
+      await apiUpdateSecret(envId, id, value);
+      await refresh(envId);
+    },
+    [refresh],
+  );
+
+  const rollbackSecret = useCallback(
+    async (envId: string, id: string, toVersion: number) => {
+      await apiRollbackSecret(envId, id, toVersion);
+      await refresh(envId);
+    },
+    [refresh],
+  );
+
+  const loadVersions = useCallback(
+    (envId: string, id: string) => apiListVersions(envId, id),
+    [],
+  );
+
+  const revealSecret = useCallback(
+    async (envId: string, id: string) => {
+      const res = await apiRevealSecret(envId, id);
+      return res.value;
+    },
+    [],
+  );
+
   const deleteSecret = useCallback(
     async (envId: string, id: string) => {
       await apiDeleteSecret(envId, id);
-      const secrets = await apiListSecrets(envId);
-      setSecretsByEnv((prev) => ({ ...prev, [envId]: secrets }));
+      await refresh(envId);
     },
-    [],
+    [refresh],
   );
 
   return (
@@ -105,9 +195,16 @@ export function SecretsProvider({ children }: { children: ReactNode }) {
         getEnvironments,
         loadEnvironments,
         createEnvironment,
+        renameEnvironment,
         getSecrets,
         loadSecrets,
+        getCapabilities,
+        loadCapabilities,
         createSecret,
+        updateSecret,
+        rollbackSecret,
+        loadVersions,
+        revealSecret,
         deleteSecret,
       }}
     >

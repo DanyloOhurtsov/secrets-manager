@@ -59,7 +59,7 @@ function actionStyle(action: string): {
   return { variant: 'secondary' };
 }
 
-export function AuditLog() {
+export function AuditLog({ organizationId }: { organizationId?: string } = {}) {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [availableActions, setAvailableActions] = useState<string[]>([]);
   const [selectedActions, setSelectedActions] = useState<string[]>([]);
@@ -91,8 +91,11 @@ export function AuditLog() {
     setLoading(true);
     setError('');
     Promise.all([
-      listAuditActions(),
-      listAuditLog({ action: actions.length > 0 ? actions : undefined }),
+      listAuditActions({ organizationId }),
+      listAuditLog({
+        action: actions.length > 0 ? actions : undefined,
+        organizationId,
+      }),
     ])
       .then(([nextActions, nextEntries]) => {
         setAvailableActions([...nextActions].sort((a, b) => a.localeCompare(b)));

@@ -1,28 +1,23 @@
 import { api } from './api';
 
-export interface Identity {
+export interface PlatformOrganization {
   id: string;
   name: string;
+  slug: string;
   type: string;
-  isSuperadmin: boolean;
+  status: string;
   createdAt: string;
+  _count: {
+    memberships: number;
+    projects: number;
+    serviceAccounts: number;
+  };
 }
 
-export interface Token {
-  id: string;
-  label: string | null;
-  createdAt: string;
-  expiresAt: string | null;
-  revokedAt: string | null;
-}
-
-export interface Grant {
-  id: string;
-  identityId: string;
-  projectId: string;
-  environment: string | null;
-  role: string;
-  createdAt: string;
+export interface Health {
+  status: string;
+  database: boolean;
+  cache: boolean;
 }
 
 export interface AuditEntry {
@@ -40,61 +35,47 @@ export interface AuditEntry {
   createdAt: string;
 }
 
-// --- Identities ---
-export function listIdentities() {
-  return api<Identity[]>('/admin/identities');
+// --- Platform: organizations (metadata + suspension, no secrets) ---
+export function listPlatformOrganizations() {
+  return api<PlatformOrganization[]>('/admin/organizations');
 }
 
-export function createIdentity(name: string, type: string) {
-  return api<Identity>('/admin/identities', {
-    method: 'POST',
-    body: JSON.stringify({ name, type }),
-  });
+export function suspendOrganization(id: string) {
+  return api<{ id: string; status: string }>(
+    `/admin/organizations/${id}/suspend`,
+    { method: 'POST' },
+  );
 }
 
-// --- Tokens ---
-export function listTokens(identityId: string) {
-  return api<Token[]>(`/admin/identities/${identityId}/tokens`);
+export function unsuspendOrganization(id: string) {
+  return api<{ id: string; status: string }>(
+    `/admin/organizations/${id}/unsuspend`,
+    { method: 'POST' },
+  );
 }
 
-export function issueToken(identityId: string, label?: string) {
-  return api<{ token: string }>(`/admin/identities/${identityId}/tokens`, {
-    method: 'POST',
-    body: JSON.stringify({ label }),
-  });
+// --- Platform: system ---
+export function getHealth() {
+  return api<Health>('/admin/health');
 }
 
-export function revokeToken(tokenId: string) {
-  return api(`/admin/tokens/${tokenId}`, { method: 'DELETE' });
+export function rotateKeys() {
+  return api<{ activeVersion: string; rotated: number; failed: string[] }>(
+    '/admin/rotate-keys',
+    { method: 'POST' },
+  );
 }
 
-// --- Grants ---
-export function listGrants(identityId: string) {
-  return api<Grant[]>(`/admin/identities/${identityId}/grants`);
-}
-
-export function createGrant(
-  identityId: string,
-  projectId: string,
-  role: string,
-  environment?: string,
-) {
-  return api<Grant>(`/admin/identities/${identityId}/grants`, {
-    method: 'POST',
-    body: JSON.stringify({ projectId, role, environment }),
-  });
-}
-
-export function revokeGrant(grantId: string) {
-  return api(`/admin/grants/${grantId}`, { method: 'DELETE' });
-}
-
-// --- Audit ---
+// --- Audit (scoped per actor on /audit, global on /admin/audit) ---
 export interface AuditFilters {
   action?: string | string[];
   organizationId?: string;
   projectId?: string;
   environmentId?: string;
+  actorId?: string;
+  targetType?: string;
+  from?: string;
+  to?: string;
 }
 
 function appendQueryParam(
@@ -118,6 +99,10 @@ function auditQuery(filters: AuditFilters = {}) {
   appendQueryParam(params, 'organizationId', filters.organizationId);
   appendQueryParam(params, 'projectId', filters.projectId);
   appendQueryParam(params, 'environmentId', filters.environmentId);
+  appendQueryParam(params, 'actorId', filters.actorId);
+  appendQueryParam(params, 'targetType', filters.targetType);
+  appendQueryParam(params, 'from', filters.from);
+  appendQueryParam(params, 'to', filters.to);
 
   return params.toString();
 }

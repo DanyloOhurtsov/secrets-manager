@@ -19,4 +19,22 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    files: ['**/*.{ts,tsx}'],
+    rules: {
+      // This app loads data inside effects (no data-fetching library), so the
+      // fetch-on-mount + setState pattern is intentional and pervasive. This
+      // opinionated rule flags it everywhere without a correctness benefit;
+      // rules-of-hooks and exhaustive-deps stay enforced via recommended.
+      'react-hooks/set-state-in-effect': 'off',
+    },
+  },
+  {
+    // Vendored shadcn/ui primitives export their variant helpers next to the
+    // component (e.g. buttonVariants) by design.
+    files: ['src/components/ui/**/*.{ts,tsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])
