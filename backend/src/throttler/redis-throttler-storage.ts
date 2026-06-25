@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ThrottlerStorage, ThrottlerStorageService } from '@nestjs/throttler';
 import Redis from 'ioredis';
 
@@ -73,7 +73,7 @@ export class RedisThrottlerStorage
 
   // redis можна передати ззовні (для тестів); інакше створюємо власне з'єднання,
   // окреме від CacheService, щоб throttling не конкурував за кеш-конекшн.
-  constructor(redis?: Redis) {
+  constructor(@Optional() redis?: Redis) {
     if (redis) {
       this.redis = redis;
       this.ownsClient = false;

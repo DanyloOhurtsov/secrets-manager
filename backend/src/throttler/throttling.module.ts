@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { ThrottlerStorage } from '@nestjs/throttler';
 import { RedisThrottlerStorage } from './redis-throttler-storage';
 import { AccountThrottlerGuard } from './account-throttler.guard';
 
@@ -8,7 +9,11 @@ import { AccountThrottlerGuard } from './account-throttler.guard';
 // - AccountThrottlerGuard доступний для @UseGuards на login/signup.
 @Global()
 @Module({
-  providers: [RedisThrottlerStorage, AccountThrottlerGuard],
-  exports: [RedisThrottlerStorage, AccountThrottlerGuard],
+  providers: [
+    RedisThrottlerStorage,
+    { provide: ThrottlerStorage, useExisting: RedisThrottlerStorage },
+    AccountThrottlerGuard,
+  ],
+  exports: [RedisThrottlerStorage, ThrottlerStorage, AccountThrottlerGuard],
 })
 export class ThrottlingModule {}
