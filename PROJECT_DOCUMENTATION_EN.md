@@ -337,9 +337,10 @@ Plaintext secret values are never stored in the database.
 Encryption schemas:
 
 - `encryptionSchemaVersion = 1` - legacy records without AES-GCM AAD. These rows remain decryptable for backward compatibility.
-- `encryptionSchemaVersion = 2` - new records with AES-GCM AAD. AAD is deterministically built from non-secret context (`secretId`, `secretVersionId`, `environmentId`, `keyVersion`) and cryptographically binds the ciphertext and encrypted data key to one specific secret version.
+- `encryptionSchemaVersion = 2` - records with AES-GCM AAD bound to `secretId`, `secretVersionId`, `environmentId` (and `keyVersion` for the data key), but **not** to the tenant. Remains decryptable for backward compatibility.
+- `encryptionSchemaVersion = 3` - current schema for all new records. The value AAD additionally binds `organizationId`, so the ciphertext is cryptographically tied to its tenant. The deterministic, versioned value AAD format is `secrets-manager:v3:org:{organizationId}:secret:{secretId}:version:{secretVersionId}:env:{environmentId}`. The data-key AAD is shared with schema 2 (it carries no `organizationId`, so master-key rotation needs only stable `secretId`/`secretVersionId`); tenant binding lives on the value ciphertext.
 
-AAD never contains plaintext secret values, data keys, master keys, tokens, passwords, or env values. If a schema 2 encrypted envelope is moved into a different secret/version/environment context, AES-GCM integrity verification should fail.
+AAD never contains plaintext secret values, data keys, master keys, tokens, passwords, or env values. If a schema 3 encrypted envelope is moved into a different tenant/secret/version/environment context (including a cross-organization ciphertext swap), AES-GCM integrity verification fails and no plaintext is returned. Schema 2 records are not tenant-bound — this is exactly why schema 3 was introduced; changing the AAD format for existing data would otherwise require a re-encryption/rotation migration.
 
 Rollback does not copy old ciphertext. It decrypts the target version on the server and creates a new `SecretVersion` encrypted under the new AAD context.
 
@@ -350,7 +351,7 @@ Master key rotation:
 - the operation re-wraps encrypted data keys to the active master key version;
 - the secret ciphertext itself is not re-encrypted;
 - legacy schema 1 is rewrapped without AAD and remains legacy;
-- schema 2 rewraps the data key from AAD with the old `keyVersion` to AAD with the active `keyVersion`;
+- schema 2 and 3 rewrap the data key from AAD with the old `keyVersion` to AAD with the active `keyVersion` (the data-key AAD carries no `organizationId`, so the value ciphertext and its tenant binding are untouched);
 - if a record is already on the active version, it is skipped.
 
 If AES-GCM integrity verification fails, the backend returns an error indicating possible corruption or tampering.

@@ -1,4 +1,8 @@
-import { Injectable, UnprocessableEntityException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { KeyProvider } from './key-provider.service';
 
@@ -8,11 +12,18 @@ const DATA_KEY_LENGTH = 32;
 
 // Версії схеми шифрування рядка SecretVersion.
 export const SCHEMA_LEGACY = 1; // AES-GCM без AAD (історичні записи)
-export const SCHEMA_AAD = 2; // value й data-key привʼязані до контексту через AAD
+export const SCHEMA_AAD = 2; // value привʼязано до secret/version/env (без org)
+export const SCHEMA_AAD_ORG = 3; // value привʼязано до ORG + secret/version/env
+
+// Схема, якою шифруються всі НОВІ записи. Тенант (organizationId) тепер входить
+// в AAD значення — крадіжка ciphertext у БД між організаціями не розшифрується,
+// навіть якщо рядок підмінити цілком (тенант-контекст не збігається).
+export const SCHEMA_CURRENT = SCHEMA_AAD_ORG;
 
 // Стабільний, не-секретний контекст версії секрету. Лише незмінні метадані —
 // з них детерміновано будується AAD. Жодного плейнтексту, ключів чи токенів.
 export interface EncryptionContext {
+  organizationId: string;
   secretId: string;
   secretVersionId: string;
   environmentId: string;
@@ -48,26 +59,43 @@ export class CryptoService {
   constructor(private readonly keyProvider: KeyProvider) {}
 
   // --- Побудова AAD (єдине місце, щоб формат не дублювався) ---------------
-  // AAD прив'язує конверт до логічного контексту в БД. Для legacy (schema 1)
+  // AAD прив'язує конверт до логічного контексту в БД. Формат версіонований і
+  // детермінований; кожна схема має власний неоднозначно розділений рядок, щоб
+  // конверт не можна було «перечитати» в іншому контексті. Для legacy (schema 1)
   // AAD не використовується взагалі, тож повертаємо undefined.
 
+  // AAD значення секрету. v3 додає organizationId — тенант-привʼязка ciphertext.
   private valueAad(
     schemaVersion: number,
     ctx: EncryptionContext,
   ): Buffer | undefined {
-    if (schemaVersion !== SCHEMA_AAD) return undefined;
-    return Buffer.from(
-      `secret-value:v2:${ctx.secretId}:${ctx.secretVersionId}:${ctx.environmentId}`,
-      'utf-8',
-    );
+    // v3 — повний тенант-контекст: org + secret + version + environment.
+    if (schemaVersion === SCHEMA_AAD_ORG) {
+      return Buffer.from(
+        `secrets-manager:v3:org:${ctx.organizationId}:secret:${ctx.secretId}:version:${ctx.secretVersionId}:env:${ctx.environmentId}`,
+        'utf-8',
+      );
+    }
+    // v2 — історичний формат без org; лишаємо читабельним для старих записів.
+    if (schemaVersion === SCHEMA_AAD) {
+      return Buffer.from(
+        `secret-value:v2:${ctx.secretId}:${ctx.secretVersionId}:${ctx.environmentId}`,
+        'utf-8',
+      );
+    }
+    return undefined; // legacy (schema 1) — без AAD
   }
 
+  // AAD «конверта» навколо data-key. Формат СПІЛЬНИЙ для v2 і v3 і навмисно НЕ
+  // містить organizationId: перепакування ключів під час ротації (rewrapDataKey)
+  // оперує лише стабільними secretId/versionId, без тенант-контексту. Тенант-
+  // привʼязку забезпечує valueAad на самому значенні секрету (v3). Legacy — без AAD.
   private dataKeyAad(
     schemaVersion: number,
     ctx: { secretId: string; secretVersionId: string },
     keyVersion: string,
   ): Buffer | undefined {
-    if (schemaVersion !== SCHEMA_AAD) return undefined;
+    if (schemaVersion === SCHEMA_LEGACY) return undefined;
     return Buffer.from(
       `data-key:v2:${ctx.secretId}:${ctx.secretVersionId}:${keyVersion}`,
       'utf-8',
@@ -102,8 +130,9 @@ export class CryptoService {
     ]);
   }
 
-  // Нове шифрування завжди використовує AAD (schema 2). Контекст обовʼязковий —
-  // він фіксує, до якого секрету/версії/оточення належить конверт.
+  // Нове шифрування завжди використовує AAD з тенант-контекстом (schema 3).
+  // Контекст обовʼязковий — він фіксує, до якої організації/секрету/версії/
+  // оточення належить конверт. organizationId входить в AAD значення.
   encrypt(value: string, context: EncryptionContext): EncryptedSecret {
     const keyVersion = this.keyProvider.getActiveVersion();
     const masterKey = this.keyProvider.getKey(keyVersion);
@@ -112,13 +141,13 @@ export class CryptoService {
     const valueEnc = this.encryptWithKey(
       dataKey,
       Buffer.from(value, 'utf-8'),
-      this.valueAad(SCHEMA_AAD, context),
+      this.valueAad(SCHEMA_CURRENT, context),
     );
 
     const dataKeyEnc = this.encryptWithKey(
       masterKey,
       dataKey,
-      this.dataKeyAad(SCHEMA_AAD, context, keyVersion),
+      this.dataKeyAad(SCHEMA_CURRENT, context, keyVersion),
     );
 
     return {
@@ -129,13 +158,15 @@ export class CryptoService {
       dataKeyIv: toBytes(dataKeyEnc.iv),
       dataKeyAuthTag: toBytes(dataKeyEnc.authTag),
       keyVersion,
-      encryptionSchemaVersion: SCHEMA_AAD,
+      encryptionSchemaVersion: SCHEMA_CURRENT,
     };
   }
 
   // Розшифрування гілкується за encryptionSchemaVersion:
-  //   1 (legacy) — без AAD, context ігнорується (старі записи лишаються читабельними);
-  //   2 (AAD)    — і data-key, і значення перевіряються разом із AAD контексту.
+  //   1 (legacy)  — без AAD, context ігнорується (старі записи лишаються читабельними);
+  //   2 (AAD)     — data-key і значення перевіряються з AAD без organizationId;
+  //   3 (AAD+org) — те саме, але AAD значення додатково містить organizationId
+  //                 (підміна ciphertext між тенантами → integrity-failure).
   decrypt(
     data: {
       ciphertext: Uint8Array;
@@ -149,9 +180,17 @@ export class CryptoService {
     },
     context: EncryptionContext,
   ): string {
+    // Відсутній/невідомий master-ключ — це збій конфігурації сервера, а НЕ
+    // підміна даних. Тримаємо його ПОЗА GCM-catch, щоб не маскувати під 422.
+    // Повідомлення навмисно загальне — без keyVersion, ключів і stack.
+    let masterKey: Buffer;
     try {
-      const masterKey = this.keyProvider.getKey(data.keyVersion);
+      masterKey = this.keyProvider.getKey(data.keyVersion);
+    } catch {
+      throw new InternalServerErrorException('Encryption key unavailable');
+    }
 
+    try {
       const dataKey = this.decryptWithKey(
         masterKey,
         data.encryptedDataKey,
@@ -183,8 +222,10 @@ export class CryptoService {
    *
    * Поведінка AAD зберігає схему рядка:
    *   - legacy (schema 1) розпаковується/запаковується БЕЗ AAD і лишається legacy;
-   *   - schema 2 розпаковується з AAD старого keyVersion і запаковується з AAD
+   *   - schema 2 і 3 розпаковуються з AAD старого keyVersion і запаковуються з AAD
    *     активного keyVersion (data-key переприв'язується до нового master-ключа).
+   *     AAD data-key спільний для v2/v3 і не містить org, тож контексту тут
+   *     достатньо secretId/versionId — тенант-привʼязка лишається на valueAad.
    */
   rewrapDataKey(
     data: {

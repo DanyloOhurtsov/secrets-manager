@@ -136,10 +136,10 @@ describe('SecretsService', () => {
 
   // --- AAD-привʼязка: контекст шифрування та маркер схеми ---
   describe('AAD context binding', () => {
-    it('binds AAD context and marks new versions with encryption schema v2', async () => {
+    it('binds AAD context (incl. organizationId) and marks new versions with encryption schema v3', async () => {
       prisma.secret.findUnique.mockResolvedValue(null);
       crypto.encrypt.mockReturnValue({
-        encryptionSchemaVersion: 2,
+        encryptionSchemaVersion: 3,
         keyVersion: 'v1',
       });
 
@@ -167,23 +167,24 @@ describe('SecretsService', () => {
 
       await service.create(actor, 'env-1', 'API_KEY', 'val');
 
-      // encrypt отримує стабільний контекст, а не голе значення.
+      // encrypt отримує стабільний контекст (з тенантом), а не голе значення.
       const ctxMatcher: unknown = expect.objectContaining({
+        organizationId: 'org-1',
         secretId: expect.any(String) as unknown,
         secretVersionId: expect.any(String) as unknown,
         environmentId: 'env-1',
       });
       expect(crypto.encrypt).toHaveBeenCalledWith('val', ctxMatcher);
-      // Рядок версії збережено з encryptionSchemaVersion = 2.
+      // Рядок версії збережено з encryptionSchemaVersion = 3 (AAD+org).
       const versionDataMatcher: unknown = expect.objectContaining({
         data: expect.objectContaining({
-          encryptionSchemaVersion: 2,
+          encryptionSchemaVersion: 3,
         }) as unknown,
       });
       expect(versionCreate).toHaveBeenCalledWith(versionDataMatcher);
     });
 
-    it('reveal threads the schema version + AAD context to decrypt (legacy and v2)', async () => {
+    it('reveal threads the schema version + AAD context to decrypt (legacy, v2 and v3)', async () => {
       const envelope = {
         ciphertext: Buffer.from(''),
         valueIv: Buffer.from(''),
@@ -194,7 +195,7 @@ describe('SecretsService', () => {
         keyVersion: 'v1',
       };
 
-      for (const schema of [1, 2]) {
+      for (const schema of [1, 2, 3]) {
         crypto.decrypt.mockClear().mockReturnValue('PLAINTEXT');
         prisma.secret.findUnique.mockResolvedValue({
           id: 's1',
@@ -215,14 +216,19 @@ describe('SecretsService', () => {
 
         const res = await service.revealOne(actor, 's1');
         expect(res.value).toBe('PLAINTEXT');
-        // Схема рядка й повний контекст передаються в crypto.decrypt → працює
-        // і для legacy (1), і для AAD (2).
+        // Схема рядка й повний контекст (з organizationId) передаються в
+        // crypto.decrypt → працює для legacy (1), AAD (2) і AAD+org (3).
         expect(crypto.decrypt).toHaveBeenCalledWith(
           expect.objectContaining({
             encryptionSchemaVersion: schema,
             keyVersion: 'v1',
           }),
-          { secretId: 's1', secretVersionId: 'ver-1', environmentId: 'env-1' },
+          {
+            organizationId: 'org-1',
+            secretId: 's1',
+            secretVersionId: 'ver-1',
+            environmentId: 'env-1',
+          },
         );
       }
     });

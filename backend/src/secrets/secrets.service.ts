@@ -85,9 +85,10 @@ export class SecretsService {
     return (max._max.version ?? 0) + 1;
   }
 
-  // Розшифрування версії з повним AAD-контекстом (secretId/versionId/environmentId).
-  // Гілку legacy-vs-v2 обирає CryptoService за encryptionSchemaVersion рядка.
+  // Розшифрування версії з повним AAD-контекстом (org/secretId/versionId/env).
+  // Гілку legacy-vs-v2-vs-v3 обирає CryptoService за encryptionSchemaVersion рядка.
   private decryptVersion(
+    organizationId: string,
     secretId: string,
     environmentId: string,
     version: {
@@ -113,7 +114,7 @@ export class SecretsService {
         keyVersion: version.keyVersion,
         encryptionSchemaVersion: version.encryptionSchemaVersion,
       },
-      { secretId, secretVersionId: version.id, environmentId },
+      { organizationId, secretId, secretVersionId: version.id, environmentId },
     );
   }
 
@@ -138,6 +139,7 @@ export class SecretsService {
     const secretId = existing ? existing.id : randomUUID();
     const secretVersionId = randomUUID();
     const enc = this.crypto.encrypt(value, {
+      organizationId: env.project.organizationId,
       secretId,
       secretVersionId,
       environmentId,
@@ -205,6 +207,7 @@ export class SecretsService {
 
     const secretVersionId = randomUUID();
     const enc = this.crypto.encrypt(value, {
+      organizationId: secret.environment.project.organizationId,
       secretId: secret.id,
       secretVersionId,
       environmentId: secret.environmentId,
@@ -302,12 +305,14 @@ export class SecretsService {
     // повертається) і перешифровуємо під контекст нової версії. Наслідок: нова
     // версія завжди пишеться як AAD-схема (v2), навіть якщо ціль була legacy.
     const plaintext = this.decryptVersion(
+      secret.environment.project.organizationId,
       secret.id,
       secret.environmentId,
       target,
     );
     const secretVersionId = randomUUID();
     const enc = this.crypto.encrypt(plaintext, {
+      organizationId: secret.environment.project.organizationId,
       secretId: secret.id,
       secretVersionId,
       environmentId: secret.environmentId,
@@ -415,7 +420,12 @@ export class SecretsService {
       canReveal,
       value:
         revealValues && s.currentVersion
-          ? this.decryptVersion(s.id, environmentId, s.currentVersion)
+          ? this.decryptVersion(
+              env.project.organizationId,
+              s.id,
+              environmentId,
+              s.currentVersion,
+            )
           : null,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
@@ -458,6 +468,7 @@ export class SecretsService {
     });
 
     const value = this.decryptVersion(
+      secret.environment.project.organizationId,
       secret.id,
       secret.environmentId,
       secret.currentVersion,

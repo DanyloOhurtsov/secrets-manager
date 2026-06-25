@@ -337,9 +337,10 @@ Plaintext значення секрету в БД не зберігається.
 Схеми шифрування:
 
 - `encryptionSchemaVersion = 1` — legacy-записи без AES-GCM AAD. Такі рядки лишаються читабельними для backward compatibility.
-- `encryptionSchemaVersion = 2` — нові записи з AES-GCM AAD. AAD детерміновано будується з не-секретного контексту (`secretId`, `secretVersionId`, `environmentId`, `keyVersion`) і криптографічно прив'язує ciphertext та encrypted data key до конкретної версії секрету.
+- `encryptionSchemaVersion = 2` — записи з AES-GCM AAD, прив'язані до `secretId`, `secretVersionId`, `environmentId` (і `keyVersion` для data key), але **не** до тенанта. Лишаються читабельними для backward compatibility.
+- `encryptionSchemaVersion = 3` — поточна схема для всіх нових записів. AAD значення додатково прив'язує `organizationId`, тож ciphertext криптографічно привʼязаний до свого тенанта. Детермінований версіонований формат AAD значення: `secrets-manager:v3:org:{organizationId}:secret:{secretId}:version:{secretVersionId}:env:{environmentId}`. AAD data-key спільний зі schema 2 (він не містить `organizationId`, тож ротації master key достатньо стабільних `secretId`/`secretVersionId`); тенант-привʼязка живе на ciphertext значення.
 
-AAD не містить plaintext secret values, data keys, master keys, токенів, паролів або env values. Якщо зашифрований envelope schema 2 переставити в інший secret/version/environment context, AES-GCM integrity check має впасти.
+AAD не містить plaintext secret values, data keys, master keys, токенів, паролів або env values. Якщо зашифрований envelope schema 3 переставити в інший tenant/secret/version/environment context (зокрема крос-організаційна підміна ciphertext), перевірка цілісності AES-GCM падає і жоден plaintext не повертається. Записи schema 2 не привʼязані до тенанта — саме тому введено schema 3; зміна формату AAD для наявних даних інакше потребувала б міграції з перешифруванням/ротацією.
 
 Rollback не копіює ciphertext старої версії. Він розшифровує цільову версію на сервері й створює нову `SecretVersion`, зашифровану під новий AAD-контекст.
 
@@ -350,7 +351,7 @@ Rollback не копіює ciphertext старої версії. Він розш
 - операція перепаковує encrypted data key на активну версію master key;
 - ciphertext самого секрету не перешифровується;
 - legacy schema 1 перепаковується без AAD і лишається legacy;
-- schema 2 перепаковує data key з AAD старого `keyVersion` на AAD активного `keyVersion`;
+- schema 2 і 3 перепаковують data key з AAD старого `keyVersion` на AAD активного `keyVersion` (AAD data-key не містить `organizationId`, тож ciphertext значення та його тенант-привʼязка не зачіпаються);
 - якщо версія вже активна, запис пропускається.
 
 Якщо перевірка цілісності AES-GCM не проходить, backend повертає помилку про можливе пошкодження або підміну даних.
