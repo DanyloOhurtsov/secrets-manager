@@ -112,10 +112,14 @@ export class AdminService {
       },
       select: { organizationId: true },
     });
+    // Доступ до аудиту проєкту — лише через project-admin РОЛЬ гранту (або org
+    // owner/admin вище). Legacy-прапорець canManageGrants свідомо НЕ враховуємо:
+    // інакше неадмінський грант із { canManageGrants: true } читав би метадані
+    // аудиту проєкту, не будучи ні org-, ні project-адміном (self-escalation).
     const adminGrants = await this.prisma.grant.findMany({
       where: {
         identityId: actor.id,
-        OR: [{ role: 'admin' }, { canManageGrants: true }],
+        role: 'admin',
       },
       select: { projectId: true },
     });

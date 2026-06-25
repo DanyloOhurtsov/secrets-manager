@@ -6,6 +6,11 @@ import {
   IsString,
 } from 'class-validator';
 
+// canManageGrants НАВМИСНО відсутній у публічних DTO: керування грантами —
+// площина org owner/admin, а не data-plane прапорець. Колись він давав делегату
+// і grant CRUD, і доступ до аудиту проєкту — це self-escalation. Тепер authz на
+// нього не спирається (див. authorization.service / admin.service), а API його
+// не приймає; у БД колонка лишається (default false) лише для legacy-рядків.
 export class CreateGrantDto {
   @IsString()
   @IsNotEmpty()
@@ -43,10 +48,6 @@ export class CreateGrantDto {
   @IsBoolean()
   @IsOptional()
   canRollbackSecrets?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
-  canManageGrants?: boolean;
 }
 
 export class UpdateGrantDto {
@@ -80,8 +81,4 @@ export class UpdateGrantDto {
   @IsBoolean()
   @IsOptional()
   canRollbackSecrets?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
-  canManageGrants?: boolean;
 }

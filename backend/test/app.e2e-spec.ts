@@ -4,27 +4,17 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from '../src/prisma.service';
+import { applyE2EEnv } from './e2e-env';
 
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
 
   beforeAll(async () => {
-    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-    if (!testDatabaseUrl) {
-      throw new Error(
-        'Refusing to run e2e tests without TEST_DATABASE_URL. These tests clean the database.',
-      );
-    }
-
-    const databaseName = new URL(testDatabaseUrl).pathname.replace(/^\//, '');
-    if (!databaseName.includes('test')) {
-      throw new Error(
-        `Refusing to run e2e tests against non-test database "${databaseName}".`,
-      );
-    }
-
-    process.env.DATABASE_URL = testDatabaseUrl;
+    // Вимагаємо test-safe TEST_DATABASE_URL + TEST_REDIS_URL і прокидаємо їх у
+    // DATABASE_URL/REDIS_URL ПЕРЕД компіляцією AppModule (кеш + rate-limit на
+    // Redis мають дивитись на тестовий інстанс, а не на дефолтний з .env).
+    applyE2EEnv();
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],

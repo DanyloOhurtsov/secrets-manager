@@ -106,7 +106,10 @@ export class GrantsService {
             canUpdateSecrets: dto.canUpdateSecrets ?? isAdmin,
             canDeleteSecrets: dto.canDeleteSecrets ?? isAdmin,
             canRollbackSecrets: dto.canRollbackSecrets ?? isAdmin,
-            canManageGrants: dto.canManageGrants ?? isAdmin,
+            // Legacy-колонка: завжди false. Керування грантами/аудитом тепер
+            // НЕ залежить від неї (тільки org owner/admin або project-admin роль),
+            // тож data-plane грант не може через неї підняти собі привілеї.
+            canManageGrants: false,
           },
         });
         await this.audit.logRequired(
@@ -229,8 +232,7 @@ export class GrantsService {
       data.canDeleteSecrets = dto.canDeleteSecrets;
     if (dto.canRollbackSecrets !== undefined)
       data.canRollbackSecrets = dto.canRollbackSecrets;
-    if (dto.canManageGrants !== undefined)
-      data.canManageGrants = dto.canManageGrants;
+    // canManageGrants свідомо не оновлюється через API (див. dto.ts).
 
     // Перемикання скоупа в межах того самого проєкту: весь проєкт ↔ оточення.
     // Проєкт лишаємо незмінним — переїзд між проєктами це окрема операція.

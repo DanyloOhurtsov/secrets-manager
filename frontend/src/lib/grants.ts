@@ -26,6 +26,8 @@ export interface OrgGrant {
   canUpdateSecrets: boolean;
   canDeleteSecrets: boolean;
   canRollbackSecrets: boolean;
+  // Read-only: легасі-колонка. API більше не приймає її на запис; нові гранти
+  // завжди false. Лишаємо в типі лише для відображення старих рядків.
   canManageGrants: boolean;
   createdAt: string;
 }
@@ -40,7 +42,6 @@ export interface GrantInput {
   canUpdateSecrets?: boolean;
   canDeleteSecrets?: boolean;
   canRollbackSecrets?: boolean;
-  canManageGrants?: boolean;
 }
 
 export type GrantUpdateInput = Partial<
@@ -53,7 +54,6 @@ export type GrantUpdateInput = Partial<
     | 'canUpdateSecrets'
     | 'canDeleteSecrets'
     | 'canRollbackSecrets'
-    | 'canManageGrants'
   >
 >;
 

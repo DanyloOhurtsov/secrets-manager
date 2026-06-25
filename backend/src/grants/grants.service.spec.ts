@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { GrantsService } from './grants.service';
+import { CreateGrantDto, UpdateGrantDto } from './dto';
 import { PrismaService } from '../prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthorizationService } from '../auth/authorization.service';
@@ -113,8 +114,10 @@ describe('GrantsService', () => {
         identityId: 'id-2',
         projectId: 'proj-1',
         role: 'viewer',
+        // Легасі-прапорець типи DTO вже не приймають — кастимо, щоб довести: навіть
+        // якби клієнт його надіслав, org-admin гейт спрацьовує першим (нічого не створено).
         canManageGrants: true,
-      }),
+      } as CreateGrantDto),
     ).rejects.toBeInstanceOf(ForbiddenException);
 
     expect(authz.assertOrganizationAdmin).toHaveBeenCalledWith(
@@ -205,7 +208,7 @@ describe('GrantsService', () => {
     );
   });
 
-  it('admin grant defaults every capability to true', async () => {
+  it('admin grant defaults secret capabilities to true but never canManageGrants', async () => {
     arrangeProjectAndMember();
     prisma.grant.create.mockResolvedValue({
       id: 'grant-1',
@@ -219,6 +222,9 @@ describe('GrantsService', () => {
       role: 'admin',
     });
 
+    // Роль admin відкриває всі capability на ЗНАЧЕННЯ, але canManageGrants
+    // лишається false: керування грантами/аудитом — площина org owner/admin,
+    // а не data-plane прапорець (H1). Реальна authz на нього не спирається.
     const adminData: unknown = expect.objectContaining({
       role: 'admin',
       canRevealSecrets: true,
@@ -226,11 +232,49 @@ describe('GrantsService', () => {
       canUpdateSecrets: true,
       canDeleteSecrets: true,
       canRollbackSecrets: true,
-      canManageGrants: true,
+      canManageGrants: false,
     });
     expect(prisma.grant.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: adminData }),
     );
+  });
+
+  it('ignores a legacy canManageGrants:true in the create payload (stores false)', async () => {
+    arrangeProjectAndMember();
+    prisma.grant.create.mockResolvedValue({
+      id: 'grant-1',
+      scopeType: 'project',
+      scopeId: 'proj-1',
+    });
+
+    // Навіть якщо клієнт обійде DTO й надішле canManageGrants: true — сервіс його
+    // не пробрасує: у БД завжди false, тож грантхолдер не отримає доступ до аудиту.
+    await service.create(actor, 'org-1', {
+      identityId: 'id-2',
+      projectId: 'proj-1',
+      role: 'developer',
+      canManageGrants: true,
+    } as CreateGrantDto);
+
+    const calls = prisma.grant.create.mock.calls as Array<
+      [{ data: Record<string, unknown> }]
+    >;
+    expect(calls[0][0].data.canManageGrants).toBe(false);
+  });
+
+  it('ignores canManageGrants in update payloads (cannot set it to true)', async () => {
+    arrangeWholeProjectGrant();
+    prisma.grant.update.mockResolvedValue({ id: 'grant-1' });
+
+    await service.update(actor, 'org-1', 'grant-1', {
+      canManageGrants: true,
+    } as UpdateGrantDto);
+
+    const calls = prisma.grant.update.mock.calls as Array<
+      [{ data: Record<string, unknown> }]
+    >;
+    // Поле взагалі не потрапляє в update — легасі-колонку через API не змінити.
+    expect(calls[0][0].data).not.toHaveProperty('canManageGrants');
   });
 
   it('rejects a project that does not belong to the organization', async () => {
