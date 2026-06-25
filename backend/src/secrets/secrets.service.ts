@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
@@ -84,6 +85,38 @@ export class SecretsService {
     return (max._max.version ?? 0) + 1;
   }
 
+  // Розшифрування версії з повним AAD-контекстом (secretId/versionId/environmentId).
+  // Гілку legacy-vs-v2 обирає CryptoService за encryptionSchemaVersion рядка.
+  private decryptVersion(
+    secretId: string,
+    environmentId: string,
+    version: {
+      id: string;
+      ciphertext: Uint8Array;
+      valueIv: Uint8Array;
+      valueAuthTag: Uint8Array;
+      encryptedDataKey: Uint8Array;
+      dataKeyIv: Uint8Array;
+      dataKeyAuthTag: Uint8Array;
+      keyVersion: string;
+      encryptionSchemaVersion: number;
+    },
+  ): string {
+    return this.crypto.decrypt(
+      {
+        ciphertext: version.ciphertext,
+        valueIv: version.valueIv,
+        valueAuthTag: version.valueAuthTag,
+        encryptedDataKey: version.encryptedDataKey,
+        dataKeyIv: version.dataKeyIv,
+        dataKeyAuthTag: version.dataKeyAuthTag,
+        keyVersion: version.keyVersion,
+        encryptionSchemaVersion: version.encryptionSchemaVersion,
+      },
+      { secretId, secretVersionId: version.id, environmentId },
+    );
+  }
+
   async create(
     actor: AuthPrincipal,
     environmentId: string,
@@ -100,18 +133,27 @@ export class SecretsService {
       throw new ConflictException('Secret with this key already exists');
     }
 
-    const enc = this.crypto.encrypt(value);
+    // Прегенеруємо ID секрету/версії, щоб AAD прив'язалась до тих самих рядків,
+    // у яких конверт буде збережено (значення вже шифрується під цей контекст).
+    const secretId = existing ? existing.id : randomUUID();
+    const secretVersionId = randomUUID();
+    const enc = this.crypto.encrypt(value, {
+      secretId,
+      secretVersionId,
+      environmentId,
+    });
 
     const secret = await this.prisma.$transaction(async (tx) => {
       // Якщо є надгробок — оживляємо його, інакше створюємо новий секрет.
       const base = existing
         ? existing
         : await tx.secret.create({
-            data: { key, environmentId, createdById: actor.id },
+            data: { id: secretId, key, environmentId, createdById: actor.id },
           });
 
       const version = await tx.secretVersion.create({
         data: {
+          id: secretVersionId,
           secretId: base.id,
           version: existing ? await this.nextVersion(tx, base.id) : 1,
           createdById: actor.id,
@@ -161,11 +203,17 @@ export class SecretsService {
       secret.environmentId,
     );
 
-    const enc = this.crypto.encrypt(value);
+    const secretVersionId = randomUUID();
+    const enc = this.crypto.encrypt(value, {
+      secretId: secret.id,
+      secretVersionId,
+      environmentId: secret.environmentId,
+    });
 
     const result = await this.prisma.$transaction(async (tx) => {
       const version = await tx.secretVersion.create({
         data: {
+          id: secretVersionId,
           secretId: secret.id,
           version: await this.nextVersion(tx, secret.id),
           createdById: actor.id,
@@ -248,20 +296,32 @@ export class SecretsService {
     if (!target) throw new NotFoundException('Target version not found');
 
     // Rollback = нова версія з тим самим значенням, історія лишається чесною.
+    // AAD прив'язує конверт до конкретного версійного рядка, тож просто скопіювати
+    // байти старої версії не можна (інша версія → інша AAD → integrity-failure).
+    // Розшифровуємо цільову версію (плейнтекст лишається на сервері, назад не
+    // повертається) і перешифровуємо під контекст нової версії. Наслідок: нова
+    // версія завжди пишеться як AAD-схема (v2), навіть якщо ціль була legacy.
+    const plaintext = this.decryptVersion(
+      secret.id,
+      secret.environmentId,
+      target,
+    );
+    const secretVersionId = randomUUID();
+    const enc = this.crypto.encrypt(plaintext, {
+      secretId: secret.id,
+      secretVersionId,
+      environmentId: secret.environmentId,
+    });
+
     const result = await this.prisma.$transaction(async (tx) => {
       const version = await tx.secretVersion.create({
         data: {
+          id: secretVersionId,
           secretId: secret.id,
           version: await this.nextVersion(tx, secret.id),
           createdById: actor.id,
           note: `rollback to v${toVersion}`,
-          ciphertext: target.ciphertext,
-          valueIv: target.valueIv,
-          valueAuthTag: target.valueAuthTag,
-          encryptedDataKey: target.encryptedDataKey,
-          dataKeyIv: target.dataKeyIv,
-          dataKeyAuthTag: target.dataKeyAuthTag,
-          keyVersion: target.keyVersion,
+          ...enc,
         },
       });
       const updated = await tx.secret.update({
@@ -355,15 +415,7 @@ export class SecretsService {
       canReveal,
       value:
         revealValues && s.currentVersion
-          ? this.crypto.decrypt({
-              ciphertext: s.currentVersion.ciphertext,
-              valueIv: s.currentVersion.valueIv,
-              valueAuthTag: s.currentVersion.valueAuthTag,
-              encryptedDataKey: s.currentVersion.encryptedDataKey,
-              dataKeyIv: s.currentVersion.dataKeyIv,
-              dataKeyAuthTag: s.currentVersion.dataKeyAuthTag,
-              keyVersion: s.currentVersion.keyVersion,
-            })
+          ? this.decryptVersion(s.id, environmentId, s.currentVersion)
           : null,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
@@ -405,15 +457,11 @@ export class SecretsService {
       metadata: { key: secret.key, version: secret.currentVersion.version },
     });
 
-    const value = this.crypto.decrypt({
-      ciphertext: secret.currentVersion.ciphertext,
-      valueIv: secret.currentVersion.valueIv,
-      valueAuthTag: secret.currentVersion.valueAuthTag,
-      encryptedDataKey: secret.currentVersion.encryptedDataKey,
-      dataKeyIv: secret.currentVersion.dataKeyIv,
-      dataKeyAuthTag: secret.currentVersion.dataKeyAuthTag,
-      keyVersion: secret.currentVersion.keyVersion,
-    });
+    const value = this.decryptVersion(
+      secret.id,
+      secret.environmentId,
+      secret.currentVersion,
+    );
 
     return { id: secret.id, value };
   }

@@ -134,6 +134,100 @@ describe('SecretsService', () => {
     );
   });
 
+  // --- AAD-привʼязка: контекст шифрування та маркер схеми ---
+  describe('AAD context binding', () => {
+    it('binds AAD context and marks new versions with encryption schema v2', async () => {
+      prisma.secret.findUnique.mockResolvedValue(null);
+      crypto.encrypt.mockReturnValue({
+        encryptionSchemaVersion: 2,
+        keyVersion: 'v1',
+      });
+
+      const versionCreate = jest
+        .fn()
+        .mockResolvedValue({ id: 'v1', version: 1 });
+      prisma.$transaction.mockImplementationOnce(
+        (cb: (tx: unknown) => unknown) =>
+          cb({
+            secret: {
+              create: jest.fn().mockResolvedValue({ id: 'sX' }),
+              update: jest.fn().mockResolvedValue({
+                id: 'sX',
+                key: 'API_KEY',
+                environmentId: 'env-1',
+                currentVersionId: 'v1',
+              }),
+            },
+            secretVersion: {
+              create: versionCreate,
+              aggregate: jest.fn().mockResolvedValue({ _max: { version: 0 } }),
+            },
+          }),
+      );
+
+      await service.create(actor, 'env-1', 'API_KEY', 'val');
+
+      // encrypt отримує стабільний контекст, а не голе значення.
+      const ctxMatcher: unknown = expect.objectContaining({
+        secretId: expect.any(String) as unknown,
+        secretVersionId: expect.any(String) as unknown,
+        environmentId: 'env-1',
+      });
+      expect(crypto.encrypt).toHaveBeenCalledWith('val', ctxMatcher);
+      // Рядок версії збережено з encryptionSchemaVersion = 2.
+      const versionDataMatcher: unknown = expect.objectContaining({
+        data: expect.objectContaining({
+          encryptionSchemaVersion: 2,
+        }) as unknown,
+      });
+      expect(versionCreate).toHaveBeenCalledWith(versionDataMatcher);
+    });
+
+    it('reveal threads the schema version + AAD context to decrypt (legacy and v2)', async () => {
+      const envelope = {
+        ciphertext: Buffer.from(''),
+        valueIv: Buffer.from(''),
+        valueAuthTag: Buffer.from(''),
+        encryptedDataKey: Buffer.from(''),
+        dataKeyIv: Buffer.from(''),
+        dataKeyAuthTag: Buffer.from(''),
+        keyVersion: 'v1',
+      };
+
+      for (const schema of [1, 2]) {
+        crypto.decrypt.mockClear().mockReturnValue('PLAINTEXT');
+        prisma.secret.findUnique.mockResolvedValue({
+          id: 's1',
+          key: 'API_KEY',
+          deletedAt: null,
+          environmentId: 'env-1',
+          environment: {
+            projectId: 'proj-1',
+            project: { id: 'proj-1', organizationId: 'org-1' },
+          },
+          currentVersion: {
+            id: 'ver-1',
+            version: 1,
+            ...envelope,
+            encryptionSchemaVersion: schema,
+          },
+        });
+
+        const res = await service.revealOne(actor, 's1');
+        expect(res.value).toBe('PLAINTEXT');
+        // Схема рядка й повний контекст передаються в crypto.decrypt → працює
+        // і для legacy (1), і для AAD (2).
+        expect(crypto.decrypt).toHaveBeenCalledWith(
+          expect.objectContaining({
+            encryptionSchemaVersion: schema,
+            keyVersion: 'v1',
+          }),
+          { secretId: 's1', secretVersionId: 'ver-1', environmentId: 'env-1' },
+        );
+      }
+    });
+  });
+
   // --- Fail-closed audit для критичних дій із секретами ---
   describe('fail-closed audit', () => {
     const liveSecret = {

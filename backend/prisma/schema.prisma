@@ -68,6 +68,9 @@ model SecretVersion {
   dataKeyIv        Bytes
   dataKeyAuthTag   Bytes
   keyVersion       String
+  // Версія схеми шифрування рядка: 1 = legacy (AES-GCM без AAD),
+  // 2 = AAD-binding (значення й data-key привʼязані до контексту секрету/версії).
+  encryptionSchemaVersion Int @default(1)
 
   secret     Secret  @relation("SecretVersions", fields: [secretId], references: [id], onDelete: Cascade)
   currentFor Secret? @relation("CurrentSecretVersion")

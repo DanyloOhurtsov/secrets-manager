@@ -39,12 +39,16 @@ export class RotationService {
 
     for (const version of versions) {
       try {
-        const rewrapped = this.crypto.rewrapDataKey({
-          encryptedDataKey: version.encryptedDataKey,
-          dataKeyIv: version.dataKeyIv,
-          dataKeyAuthTag: version.dataKeyAuthTag,
-          keyVersion: version.keyVersion,
-        });
+        const rewrapped = this.crypto.rewrapDataKey(
+          {
+            encryptedDataKey: version.encryptedDataKey,
+            dataKeyIv: version.dataKeyIv,
+            dataKeyAuthTag: version.dataKeyAuthTag,
+            keyVersion: version.keyVersion,
+            encryptionSchemaVersion: version.encryptionSchemaVersion,
+          },
+          { secretId: version.secretId, secretVersionId: version.id },
+        );
 
         if (!rewrapped) continue; // вже на активній (на випадок гонки)
 
