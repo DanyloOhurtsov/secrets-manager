@@ -329,9 +329,19 @@ The backend uses envelope encryption:
    - value IV and auth tag;
    - encrypted data key;
    - data key IV and auth tag;
-   - `keyVersion`.
+   - `keyVersion`;
+   - `encryptionSchemaVersion`.
 
 Plaintext secret values are never stored in the database.
+
+Encryption schemas:
+
+- `encryptionSchemaVersion = 1` - legacy records without AES-GCM AAD. These rows remain decryptable for backward compatibility.
+- `encryptionSchemaVersion = 2` - new records with AES-GCM AAD. AAD is deterministically built from non-secret context (`secretId`, `secretVersionId`, `environmentId`, `keyVersion`) and cryptographically binds the ciphertext and encrypted data key to one specific secret version.
+
+AAD never contains plaintext secret values, data keys, master keys, tokens, passwords, or env values. If a schema 2 encrypted envelope is moved into a different secret/version/environment context, AES-GCM integrity verification should fail.
+
+Rollback does not copy old ciphertext. It decrypts the target version on the server and creates a new `SecretVersion` encrypted under the new AAD context.
 
 Master key rotation:
 
@@ -339,6 +349,8 @@ Master key rotation:
 - access: superadmin only;
 - the operation re-wraps encrypted data keys to the active master key version;
 - the secret ciphertext itself is not re-encrypted;
+- legacy schema 1 is rewrapped without AAD and remains legacy;
+- schema 2 rewraps the data key from AAD with the old `keyVersion` to AAD with the active `keyVersion`;
 - if a record is already on the active version, it is skipped.
 
 If AES-GCM integrity verification fails, the backend returns an error indicating possible corruption or tampering.
@@ -703,7 +715,6 @@ Fail-closed audit is used for security-critical actions: secret reveal, secret m
 
 This is a roadmap, not the current system guarantee:
 
-- AES-GCM AAD: bind ciphertext/encrypted data keys to context (`secretId`, `version`, `keyVersion`) and add backward-compatible decrypt for existing records.
 - Browser auth cookies: move `sess_...` out of `localStorage` and into an `httpOnly`, `Secure`, `SameSite` cookie.
 - Soft-delete policy: define the difference between recoverable delete/version history and compliance hard purge.
 - Redis hardening: enable authentication/TLS/network isolation for production Redis, because Redis backs token cache and rate-limit storage.

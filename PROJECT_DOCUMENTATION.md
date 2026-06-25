@@ -329,9 +329,19 @@ Backend використовує envelope encryption:
    - IV і auth tag значення;
    - encrypted data key;
    - IV і auth tag data key;
-   - `keyVersion`.
+   - `keyVersion`;
+   - `encryptionSchemaVersion`.
 
 Plaintext значення секрету в БД не зберігається.
+
+Схеми шифрування:
+
+- `encryptionSchemaVersion = 1` — legacy-записи без AES-GCM AAD. Такі рядки лишаються читабельними для backward compatibility.
+- `encryptionSchemaVersion = 2` — нові записи з AES-GCM AAD. AAD детерміновано будується з не-секретного контексту (`secretId`, `secretVersionId`, `environmentId`, `keyVersion`) і криптографічно прив'язує ciphertext та encrypted data key до конкретної версії секрету.
+
+AAD не містить plaintext secret values, data keys, master keys, токенів, паролів або env values. Якщо зашифрований envelope schema 2 переставити в інший secret/version/environment context, AES-GCM integrity check має впасти.
+
+Rollback не копіює ciphertext старої версії. Він розшифровує цільову версію на сервері й створює нову `SecretVersion`, зашифровану під новий AAD-контекст.
 
 Ротація master key:
 
@@ -339,6 +349,8 @@ Plaintext значення секрету в БД не зберігається.
 - доступ: тільки superadmin;
 - операція перепаковує encrypted data key на активну версію master key;
 - ciphertext самого секрету не перешифровується;
+- legacy schema 1 перепаковується без AAD і лишається legacy;
+- schema 2 перепаковує data key з AAD старого `keyVersion` на AAD активного `keyVersion`;
 - якщо версія вже активна, запис пропускається.
 
 Якщо перевірка цілісності AES-GCM не проходить, backend повертає помилку про можливе пошкодження або підміну даних.
@@ -702,7 +714,6 @@ Fail-closed використовується для security-critical дій: re
 
 Це roadmap, а не поточні гарантії системи:
 
-- AES-GCM AAD: прив'язати ciphertext/encrypted data key до контексту (`secretId`, `version`, `keyVersion`) і додати backward-compatible decrypt для вже існуючих записів.
 - Browser auth cookies: перенести `sess_...` із `localStorage` у `httpOnly`, `Secure`, `SameSite` cookie.
 - Soft-delete policy: визначити різницю між recoverable delete/version history і compliance hard purge.
 - Redis hardening: увімкнути authentication/TLS/network isolation для production Redis, бо Redis використовується для token cache і rate-limit storage.
