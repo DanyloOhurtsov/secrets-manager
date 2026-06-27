@@ -1,10 +1,21 @@
 import { useEffect, useState } from 'react';
 import {
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  History as HistoryIcon,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
+} from 'lucide-react';
+import {
   type Secret,
   type SecretVersion,
   type EnvironmentCapabilities,
 } from '@/lib/secrets';
 import { notifyError } from '@/lib/errors';
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -23,6 +34,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 interface SecretsTableProps {
   secrets: Secret[] | undefined;
@@ -124,14 +141,14 @@ export function SecretsTable({
         <p className="text-muted-foreground">No secrets yet.</p>
       ) : (
         <div className="overflow-x-auto">
-          <Table>
+          <Table className="w-full table-fixed">
           <TableHeader>
             <TableRow>
-              <TableHead>Key</TableHead>
+              <TableHead className="w-[20rem]">Key</TableHead>
               <TableHead>Value</TableHead>
-              <TableHead className="w-16">Ver</TableHead>
-              <TableHead className="w-px text-right whitespace-nowrap">
-                Actions
+              <TableHead className="w-12 text-center">Ver</TableHead>
+              <TableHead className="w-12 text-right">
+                <span className="sr-only">Actions</span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -139,56 +156,84 @@ export function SecretsTable({
             {secrets.map((s) => {
               const isRevealed = revealed[s.id] !== undefined;
               return (
-                <TableRow key={s.id}>
-                  <TableCell className="font-mono">{s.key}</TableCell>
-                  <TableCell
-                    className="font-mono max-w-65 truncate"
-                    title={isRevealed ? revealed[s.id] : undefined}
-                  >
-                    {!s.canReveal
-                      ? '••••••••'
-                      : isRevealed
-                        ? revealed[s.id]
-                        : '••••••••'}
+                <TableRow key={s.id} className="group">
+                  <TableCell className="overflow-hidden font-mono">
+                    <div className="flex items-center gap-1">
+                      <span className="min-w-0 truncate" title={s.key}>
+                        {s.key}
+                      </span>
+                      <CopyKeyButton secretKey={s.key} />
+                    </div>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell className="overflow-hidden font-mono">
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                      <span
+                        className="truncate"
+                        title={isRevealed ? revealed[s.id] : undefined}
+                      >
+                        {!s.canReveal
+                          ? '••••••••'
+                          : isRevealed
+                            ? revealed[s.id]
+                            : '••••••••'}
+                      </span>
+                      {s.canReveal && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={
+                            isRevealed
+                              ? `Hide value of ${s.key}`
+                              : `Show value of ${s.key}`
+                          }
+                          title={isRevealed ? 'Hide secret value' : 'Show secret value'}
+                          className="text-muted-foreground"
+                          onClick={() => void toggleReveal(s.id)}
+                        >
+                          {isRevealed ? <EyeOff /> : <Eye />}
+                        </Button>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell className="w-12 text-center text-muted-foreground">
                     {s.currentVersion ?? '—'}
                   </TableCell>
-                  <TableCell className="text-right whitespace-nowrap">
-                    {s.canReveal && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void toggleReveal(s.id)}
-                      >
-                        {isRevealed ? 'Hide' : 'Show'}
-                      </Button>
-                    )}
-                    {capabilities?.canUpdate && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setEditing(s)}
-                      >
-                        Edit
-                      </Button>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setHistory(s)}
-                    >
-                      History
-                    </Button>
-                    {capabilities?.canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => run(() => onDelete(s.id))}
-                      >
-                        Delete
-                      </Button>
-                    )}
+                  <TableCell className="w-12 text-right">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Actions for ${s.key}`}
+                          title="Secret actions"
+                          className="text-muted-foreground"
+                        >
+                          <MoreHorizontal />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        {capabilities?.canUpdate && (
+                          <DropdownMenuItem onSelect={() => setEditing(s)}>
+                            <Pencil />
+                            Edit
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem onSelect={() => setHistory(s)}>
+                          <HistoryIcon />
+                          History
+                        </DropdownMenuItem>
+                        {capabilities?.canDelete && (
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => void run(() => onDelete(s.id))}
+                          >
+                            <Trash2 />
+                            Delete
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               );
@@ -228,6 +273,48 @@ export function SecretsTable({
         />
       )}
     </div>
+  );
+}
+
+// Кнопка-іконка для копіювання лише назви секрету (без значення).
+function CopyKeyButton({ secretKey }: { secretKey: string }) {
+  const [copied, setCopied] = useState(false);
+
+  // Повертаємо іконку назад до Copy за мить після успіху.
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(secretKey);
+      setCopied(true);
+    } catch (err) {
+      notifyError(err);
+    }
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      aria-label={`Copy key ${secretKey}`}
+      title="Copy secret key"
+      onClick={() => void copy()}
+      className={cn(
+        'text-muted-foreground opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100',
+        copied && 'opacity-100',
+      )}
+    >
+      {copied ? (
+        <Check className="text-emerald-600 dark:text-emerald-400" />
+      ) : (
+        <Copy />
+      )}
+    </Button>
   );
 }
 
