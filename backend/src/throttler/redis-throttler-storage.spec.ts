@@ -96,4 +96,63 @@ describe('RedisThrottlerStorage', () => {
     expect(r2.isBlocked).toBe(false);
     expect(r3.isBlocked).toBe(true);
   });
+
+  // --- Lifecycle: власний клієнт закривається РІВНО один раз ------------------
+  // NestJS кличе destroy-хук на КОЖНОМУ токені, під яким є інстанс; ThrottlerStorage
+  // аліасимо на цей провайдер (useExisting), тож хук прилітає двічі. Раніше другий
+  // виклик робив quit() на вже закритому зʼєднанні → catch → ioredis.disconnect(),
+  // що лишало ref-таймер безпеки (≈2с) і тримало event loop живим (Jest open-handle).
+
+  // Власне зʼєднання (ownsClient=true) створюється лише коли redis НЕ передано в
+  // конструктор — тут підставляємо мок-клієнт і вмикаємо володіння вручну, щоб не
+  // тягнути реальний Redis у юніт-тест.
+  function ownedStorage(redisMock: Partial<Redis>): RedisThrottlerStorage {
+    const s = new RedisThrottlerStorage(redisMock as Redis);
+    (s as unknown as { ownsClient: boolean }).ownsClient = true;
+    return s;
+  }
+
+  it('closes the owned redis client exactly once even when destroyed twice', async () => {
+    const quit = jest.fn().mockResolvedValue('OK');
+    const disconnect = jest.fn();
+    const s = ownedStorage({ eval: jest.fn(), quit, disconnect });
+
+    // Симулюємо подвійний destroy від aliased-провайдера (навіть паралельно).
+    await Promise.all([s.onModuleDestroy(), s.onModuleDestroy()]);
+    await s.onModuleDestroy();
+
+    // quit() рівно раз; disconnect() (саме він лишав ref-таймер) — жодного разу.
+    expect(quit).toHaveBeenCalledTimes(1);
+    expect(disconnect).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a single disconnect() when quit() fails, and stays idempotent', async () => {
+    const quit = jest.fn().mockRejectedValue(new Error('Connection is closed.'));
+    const disconnect = jest.fn();
+    const s = ownedStorage({ eval: jest.fn(), quit, disconnect });
+
+    await s.onModuleDestroy();
+    await s.onModuleDestroy();
+
+    // Навіть коли quit() падає (Redis недоступний) — одна спроба quit і один
+    // disconnect, без повторів на наступних destroy-викликах.
+    expect(quit).toHaveBeenCalledTimes(1);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not touch an externally-owned client on destroy', async () => {
+    const quit = jest.fn();
+    const disconnect = jest.fn();
+    // redis передано ззовні → ownsClient=false (його lifecycle не наш).
+    const s = new RedisThrottlerStorage({
+      eval: jest.fn(),
+      quit,
+      disconnect,
+    } as unknown as Redis);
+
+    await s.onModuleDestroy();
+
+    expect(quit).not.toHaveBeenCalled();
+    expect(disconnect).not.toHaveBeenCalled();
+  });
 });

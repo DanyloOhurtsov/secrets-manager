@@ -70,6 +70,9 @@ export class RedisThrottlerStorage
   // Резервне per-process сховище на випадок недоступності Redis.
   private readonly fallback = new ThrottlerStorageService();
   private degraded = false;
+  // Меморізований teardown: гарантує, що власний клієнт закриється РІВНО один
+  // раз, навіть якщо destroy-хук прилетить кілька разів (див. onModuleDestroy).
+  private shutdownPromise?: Promise<void>;
 
   // redis можна передати ззовні (для тестів); інакше створюємо власне з'єднання,
   // окреме від CacheService, щоб throttling не конкурував за кеш-конекшн.
@@ -146,15 +149,34 @@ export class RedisThrottlerStorage
     }
   }
 
-  async onModuleDestroy() {
-    // Прибираємо таймери in-memory fallback, щоб не лишати відкритих хендлів.
+  async onModuleDestroy(): Promise<void> {
+    // NestJS викликає destroy-хук на КОЖНОМУ DI-токені, під яким зареєстровано
+    // інстанс. Ми навмисно аліасимо ThrottlerStorage на цей самий провайдер
+    // (throttling.module.ts → useExisting), тож хук прилітає двічі на той самий
+    // об'єкт. Без захисту другий виклик робив би quit() на вже закритому
+    // зʼєднанні ("Connection is closed."), падав у catch і кликав
+    // ioredis.disconnect(), який лишає ref-таймер безпеки
+    // (setTimeout(stream.destroy, disconnectTimeout ≈ 2с)). Той таймер тримає
+    // event loop живим і дає Jest відоме "did not exit one second after the test
+    // run has completed". Тому закриваємо ресурси ідемпотентно — рівно один раз.
+    if (!this.shutdownPromise) {
+      this.shutdownPromise = this.shutdown();
+    }
+    await this.shutdownPromise;
+  }
+
+  private async shutdown(): Promise<void> {
+    // Таймери in-memory fallback прибираємо завжди (idempotent, без зʼєднання).
     this.fallback.onApplicationShutdown();
-    if (this.ownsClient) {
-      try {
-        await this.redis.quit();
-      } catch {
-        this.redis.disconnect();
-      }
+    // Зовнішній клієнт нам не належить — його lifecycle лишаємо власнику.
+    if (!this.ownsClient) {
+      return;
+    }
+    try {
+      await this.redis.quit();
+    } catch {
+      // Резерв, якщо quit() не вдався (Redis недоступний): рвемо зʼєднання.
+      this.redis.disconnect();
     }
   }
 }
