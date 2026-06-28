@@ -1,0 +1,175 @@
+name: CI
+
+# Запускаємо CI на PR, на пуш у main та у будь-яку codex/** гілку, плюс ручний
+# запуск. pull_request_target НЕ використовуємо (він дав би доступ до секретів
+# репо для коду з форка).
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  workflow_dispatch:
+
+# Мінімальні права: воркфлоу лише читає код, нічого не пише й не публікує.
+permissions:
+  contents: read
+
+# Один прогін на гілку: новіший пуш скасовує застарілий, що ще біжить.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+
+jobs:
+  backend:
+    name: Backend (unit + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Unit tests
+        run: npm test -- --runInBand
+      - name: Build
+        run: npm run build
+
+  frontend:
+    name: Frontend (lint + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+
+  cli:
+    name: CLI (test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  e2e:
+    name: Backend E2E (Postgres + Redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    # Ізольовані сервіс-контейнери GitHub Actions замість docker compose: цього
+    # достатньо для e2e, а логи й healthcheck простіші для читання.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dev
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: secrets_manager_test
+        ports:
+          - 5432:5432
+        # Healthcheck: pg_isready по тестовій БД — job чекає, поки Postgres готовий.
+        options: >-
+          --health-cmd "pg_isready -U dev -d secrets_manager_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        # Healthcheck: redis-cli ping.
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # DATABASE_URL — для `prisma migrate deploy`. TEST_DATABASE_URL/TEST_REDIS_URL —
+      # для самих e2e (fail-closed гарди: ім'я БД містить "test", Redis DB != 0).
+      # Усе одноразове, лише для цього прогону CI.
+      DATABASE_URL: postgresql://dev:dev@localhost:5432/secrets_manager_test
+      TEST_DATABASE_URL: postgresql://dev:dev@localhost:5432/secrets_manager_test
+      TEST_REDIS_URL: redis://localhost:6379/15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate ephemeral master key
+        # Свіжий 32-байтний майстер-ключ лише для цього прогону. Значення НЕ
+        # друкуємо: node пише його в command substitution, ми реєструємо його як
+        # маску (::add-mask::) і дописуємо у $GITHUB_ENV (а не в stdout). Жодного
+        # коміту, repo-secret чи .env-артефакту.
+        run: |
+          KEY="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
+          echo "::add-mask::$KEY"
+          {
+            echo "MASTER_KEYS=v1:$KEY"
+            echo "ACTIVE_KEY_VERSION=v1"
+          } >> "$GITHUB_ENV"
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+      - name: E2E tests
+        run: npm run test:e2e

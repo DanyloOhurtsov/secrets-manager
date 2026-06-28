@@ -643,10 +643,18 @@ E2E-тести:
 
 ```bash
 cd backend
-TEST_DATABASE_URL="postgresql://dev:dev@localhost:5433/secrets_manager_test" npm run test:e2e
+TEST_DATABASE_URL="postgresql://dev:dev@localhost:5433/secrets_manager_test" \
+TEST_REDIS_URL="redis://localhost:6379/15" \
+npm run test:e2e
 ```
 
-E2E-тести потребують окремої disposable бази. У коді тестів є захист від випадкового запуску на production/dev базі: назва бази має містити `test`.
+E2E-тести потребують окремих disposable Postgres і Redis. У коді є fail-closed захист
+від випадкового запуску на production/dev інстансі — потрібні **обидві** змінні:
+
+- `TEST_DATABASE_URL` — ім'я бази має містити `test`, інакше тести відмовляються чистити БД;
+- `TEST_REDIS_URL` — має вказувати на **ненульовий** індекс Redis DB (напр. `/15`) або містити
+  `test` у URL. DB 15 — одноразова й безпечна для `flushdb`; **ніколи не використовуйте DB 0**,
+  бо туди дивиться дев-застосунок (token cache + rate-limit) і flush знесе спільні дані.
 
 Frontend build-перевірка:
 
@@ -661,6 +669,25 @@ CLI build-перевірка:
 cd cli
 npm run build
 ```
+
+### CI (GitHub Actions)
+
+`.github/workflows/ci.yml` проганяє ті самі перевірки на кожен PR, на пуш у `main` та
+в гілки `codex/**` (плюс ручний `workflow_dispatch`). Права воркфлоу — лише
+`contents: read`; новіший прогін тієї ж гілки скасовує застарілий (`cancel-in-progress`).
+Окремі джоби:
+
+- **Backend** — `npm ci`, `npx prisma generate`, `npm test -- --runInBand`, `npm run build`;
+- **Frontend** — `npm ci`, `npm run lint`, `npm run build`;
+- **CLI** — `npm ci`, `npm test`, `npm run build`;
+- **Backend E2E** — піднімає ізольовані сервіс-контейнери PostgreSQL 16 і Redis 7 (з
+  healthcheck `pg_isready` / `redis-cli ping`), застосовує міграції (`prisma migrate deploy`)
+  і ганяє `npm run test:e2e` проти `secrets_manager_test` та Redis DB 15. Майстер-ключ
+  шифрування генерується одноразово всередині прогону й ніколи не друкується в логах
+  (реальні секрети репозиторію тут не використовуються).
+
+Lint бекенду поки **не** є CI-гейтом (історичний борг `eslint --fix`) — це окремий
+наступний крок.
 
 ## 17. Аудит
 

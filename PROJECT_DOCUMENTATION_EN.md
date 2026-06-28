@@ -644,10 +644,19 @@ E2E tests:
 
 ```bash
 cd backend
-TEST_DATABASE_URL="postgresql://dev:dev@localhost:5433/secrets_manager_test" npm run test:e2e
+TEST_DATABASE_URL="postgresql://dev:dev@localhost:5433/secrets_manager_test" \
+TEST_REDIS_URL="redis://localhost:6379/15" \
+npm run test:e2e
 ```
 
-E2E tests require a separate disposable database. The test code protects against accidental use of a production/dev database: the database name must contain `test`.
+E2E tests require separate disposable Postgres and Redis instances. The test code has
+fail-closed guards against accidental use of a production/dev instance — **both**
+variables are required:
+
+- `TEST_DATABASE_URL` — the database name must contain `test`, otherwise the tests refuse to wipe it;
+- `TEST_REDIS_URL` — must point at a **non-zero** Redis DB index (e.g. `/15`) or contain `test`
+  in the URL. DB 15 is disposable and safe to `flushdb`; **never use DB 0**, which the dev app
+  uses (token cache + rate-limit) — flushing it would destroy shared data.
 
 Frontend build check:
 
@@ -662,6 +671,25 @@ CLI build check:
 cd cli
 npm run build
 ```
+
+### CI (GitHub Actions)
+
+`.github/workflows/ci.yml` runs the same checks on every PR, on pushes to `main`, and on
+`codex/**` branches (plus manual `workflow_dispatch`). Workflow permissions are
+`contents: read` only, and a newer push to the same branch cancels the stale run
+(`cancel-in-progress`). Separate jobs:
+
+- **Backend** — `npm ci`, `npx prisma generate`, `npm test -- --runInBand`, `npm run build`;
+- **Frontend** — `npm ci`, `npm run lint`, `npm run build`;
+- **CLI** — `npm ci`, `npm test`, `npm run build`;
+- **Backend E2E** — spins up isolated PostgreSQL 16 and Redis 7 service containers (with
+  `pg_isready` / `redis-cli ping` health checks), applies migrations (`prisma migrate deploy`),
+  and runs `npm run test:e2e` against `secrets_manager_test` and Redis DB 15. The encryption
+  master key is generated once inside the run and is never printed to the logs (no real
+  repository secrets are used here).
+
+Backend lint is **not** yet a CI gate (historical `eslint --fix` debt) — that is a separate
+follow-up.
 
 ## 17. Audit
 
