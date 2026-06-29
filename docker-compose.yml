@@ -1,3 +1,23 @@
+# Turnkey local stack: Postgres + Redis + backend (API) + frontend (UI).
+#
+# One command brings up everything:
+#
+#   docker compose up --build
+#
+#   UI  -> http://localhost:8080
+#   API -> http://localhost:3000   (this is what the `secrets` CLI talks to)
+#
+# The MASTER_KEYS / ACTIVE_KEY_VERSION defaults below are DEV-ONLY so the stack
+# boots with zero manual crypto. For anything real, override them — e.g. create a
+# `.env` next to this file:
+#
+#   MASTER_KEYS=v1:<64 hex chars>
+#   ACTIVE_KEY_VERSION=v1
+#
+# (see backend/.env.example for how to generate a key).
+#
+# Doing local backend dev instead? Bring up just the infra:  docker compose up -d db redis
+
 services:
   db:
     image: postgres:16
@@ -10,12 +30,58 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d secrets_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7
     container_name: secrets_redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: secrets_backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://dev:dev@db:5432/secrets_manager
+      REDIS_URL: redis://redis:6379
+      # DEV-ONLY default master key — override for production (see backend/.env.example).
+      MASTER_KEYS: ${MASTER_KEYS:-v1:ec03de457afe235850ec435f0aaaf9bf32dba3722eca106428c4f088f7403661}
+      ACTIVE_KEY_VERSION: ${ACTIVE_KEY_VERSION:-v1}
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  frontend:
+    build: ./frontend
+    container_name: secrets_frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
 
 volumes:
   pgdata:

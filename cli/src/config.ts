@@ -1,10 +1,11 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   mkdirSync,
   writeFileSync,
   readFileSync,
   existsSync,
+  chmodSync,
 } from 'node:fs';
 
 const CONFIG_DIR = join(homedir(), '.secrets-manager');
@@ -15,10 +16,19 @@ interface Config {
   token?: string;
 }
 
+// Записує конфіг за вказаним шляхом і ГАРАНТУЄ права 0600. Винесено окремо (з
+// параметром шляху), щоб тести могли перевіряти права на тимчасовому файлі, не
+// чіпаючи реальний ~/.secrets-manager/config.json.
+export function writeConfigFileAt(filePath: string, config: Config): void {
+  mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
+  writeFileSync(filePath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  // mode у writeFileSync діє ЛИШЕ при створенні файлу. Якщо config.json уже
+  // існував із ширшими правами (напр. 0644) — явний chmod все одно звужує до 0600.
+  chmodSync(filePath, 0o600);
+}
+
 export function saveConfig(config: Config): void {
-  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  // mode 0o600 — читати/писати може лише власник
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeConfigFileAt(CONFIG_FILE, config);
 }
 
 export function loadConfig(): Config {

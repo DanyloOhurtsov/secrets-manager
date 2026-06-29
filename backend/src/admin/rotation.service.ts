@@ -14,34 +14,46 @@ export class RotationService {
   ) {}
 
   /**
-   * Перешифровує data-keys усіх секретів, що не на активній версії master-ключа.
-   * Ідемпотентна: секрети, вже на активній версії, пропускаються.
+   * Перешифровує data-keys усіх версій секретів, що не на активній версії master-ключа.
+   * Ідемпотентна: версії, вже на активній версії, пропускаються.
    * Значення секретів не зачіпаються — лише "конверт" навколо data-key.
    */
   async rotate(actorId: string) {
     const activeVersion = this.keyProvider.getActiveVersion();
 
+    await this.audit.logRequired({
+      actorId,
+      action: 'key_rotation.start',
+      targetType: 'system',
+      targetId: activeVersion,
+      metadata: { toVersion: activeVersion },
+    });
+
     // беремо лише ті, що не на активній версії
-    const secrets = await this.prisma.secret.findMany({
+    const versions = await this.prisma.secretVersion.findMany({
       where: { keyVersion: { not: activeVersion } },
     });
 
     let rotated = 0;
     const failed: string[] = [];
 
-    for (const s of secrets) {
+    for (const version of versions) {
       try {
-        const rewrapped = this.crypto.rewrapDataKey({
-          encryptedDataKey: s.encryptedDataKey,
-          dataKeyIv: s.dataKeyIv,
-          dataKeyAuthTag: s.dataKeyAuthTag,
-          keyVersion: s.keyVersion,
-        });
+        const rewrapped = this.crypto.rewrapDataKey(
+          {
+            encryptedDataKey: version.encryptedDataKey,
+            dataKeyIv: version.dataKeyIv,
+            dataKeyAuthTag: version.dataKeyAuthTag,
+            keyVersion: version.keyVersion,
+            encryptionSchemaVersion: version.encryptionSchemaVersion,
+          },
+          { secretId: version.secretId, secretVersionId: version.id },
+        );
 
         if (!rewrapped) continue; // вже на активній (на випадок гонки)
 
-        await this.prisma.secret.update({
-          where: { id: s.id },
+        await this.prisma.secretVersion.update({
+          where: { id: version.id },
           data: {
             encryptedDataKey: rewrapped.encryptedDataKey,
             dataKeyIv: rewrapped.dataKeyIv,
@@ -52,13 +64,13 @@ export class RotationService {
         rotated++;
       } catch {
         // не валимо весь процес через один секрет — фіксуємо й продовжуємо
-        failed.push(s.id);
+        failed.push(version.id);
       }
     }
 
-    await this.audit.log({
+    await this.audit.logRequired({
       actorId,
-      action: 'keys.rotate',
+      action: 'key_rotation.complete',
       targetType: 'system',
       targetId: activeVersion,
       metadata: { rotated, failed: failed.length, toVersion: activeVersion },
@@ -66,7 +78,7 @@ export class RotationService {
 
     return {
       activeVersion,
-      total: secrets.length,
+      total: versions.length,
       rotated,
       failed,
     };

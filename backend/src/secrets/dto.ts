@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsInt, IsNotEmpty, IsString, Min } from 'class-validator';
 
 export class CreateSecretDto {
   @IsString()
@@ -8,4 +8,23 @@ export class CreateSecretDto {
   @IsString()
   @IsNotEmpty()
   value: string;
+}
+
+export class UpdateSecretDto {
+  @IsString()
+  @IsNotEmpty()
+  value: string;
+}
+
+export class RollbackSecretDto {
+  @IsInt()
+  @Min(1)
+  toVersion: number;
+}
+
+export class ImportSecretsDto {
+  // Сирий текст .env (paste або вміст завантаженого файлу) — парситься на сервері.
+  @IsString()
+  @IsNotEmpty()
+  content: string;
 }

@@ -1,57 +1,50 @@
 import { useEffect, useState } from 'react';
 import {
-  listIdentities,
-  createIdentity,
-  type Identity,
+  listPlatformOrganizations,
+  suspendOrganization,
+  unsuspendOrganization,
+  getHealth,
+  rotateKeys,
+  type PlatformOrganization,
+  type Health,
 } from '@/lib/admin';
-import { IdentityDetail } from './IdentityDetail';
 import { AuditLog } from './AuditLog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 
 export function Admin({ onBack }: { onBack: () => void }) {
-  const [selected, setSelected] = useState<Identity | null>(null);
-
-  if (selected) {
-    return (
-      <IdentityDetail
-        identity={selected}
-        onBack={() => setSelected(null)}
-      />
-    );
-  }
-
   return (
     <div>
       <div className="flex items-center gap-3 mb-6">
         <Button variant="ghost" onClick={onBack}>
           ← Back
         </Button>
-        <h2 className="text-xl font-semibold">Access Management</h2>
+        <h2 className="text-xl font-semibold">Platform Administration</h2>
       </div>
 
-      <Tabs defaultValue="identities">
+      <Tabs defaultValue="organizations">
         <TabsList className="mb-4">
-          <TabsTrigger value="identities">Identities</TabsTrigger>
-          <TabsTrigger value="audit">Audit Log</TabsTrigger>
+          <TabsTrigger value="organizations">Organizations</TabsTrigger>
+          <TabsTrigger value="system">System</TabsTrigger>
+          <TabsTrigger value="audit">Global Audit</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="identities">
-          <IdentitiesList onSelect={setSelected} />
+        <TabsContent value="organizations">
+          <PlatformOrganizations />
         </TabsContent>
-
+        <TabsContent value="system">
+          <SystemTab />
+        </TabsContent>
         <TabsContent value="audit">
           <AuditLog />
         </TabsContent>
@@ -60,20 +53,16 @@ export function Admin({ onBack }: { onBack: () => void }) {
   );
 }
 
-function IdentitiesList({ onSelect }: { onSelect: (i: Identity) => void }) {
-  const [identities, setIdentities] = useState<Identity[]>([]);
+function PlatformOrganizations() {
+  const [orgs, setOrgs] = useState<PlatformOrganization[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [name, setName] = useState('');
-  const [type, setType] = useState('human');
 
   async function load() {
     setLoading(true);
     setError('');
     try {
-      setIdentities(await listIdentities());
+      setOrgs(await listPlatformOrganizations());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
     } finally {
@@ -85,87 +74,164 @@ function IdentitiesList({ onSelect }: { onSelect: (i: Identity) => void }) {
     void load();
   }, []);
 
-  async function handleCreate() {
+  async function toggle(org: PlatformOrganization) {
+    setError('');
     try {
-      await createIdentity(name.trim(), type);
-      setName('');
-      setType('human');
-      setDialogOpen(false);
+      if (org.status === 'suspended') {
+        await unsuspendOrganization(org.id);
+      } else {
+        await suspendOrganization(org.id);
+      }
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create');
+      setError(err instanceof Error ? err.message : 'Failed to update');
     }
   }
 
+  if (loading) return <p className="text-muted-foreground">Loading...</p>;
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <p className="text-sm text-muted-foreground">
-          {identities.length} identit{identities.length === 1 ? 'y' : 'ies'}
-        </p>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button>New identity</Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Create identity</DialogTitle>
-            </DialogHeader>
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="iname">Name</Label>
-                <Input
-                  id="iname"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="maria / ci-bot"
-                />
-              </div>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="itype">Type</Label>
-                <select
-                  id="itype"
-                  className="border rounded-md h-9 px-3 text-sm bg-transparent"
-                  value={type}
-                  onChange={(e) => setType(e.target.value)}
+      {error && <p className="text-sm text-red-500 mb-2">{error}</p>}
+      <p className="text-sm text-muted-foreground mb-4">
+        Metadata only — platform admins never see tenant secrets.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Name</TableHead>
+            <TableHead>Type</TableHead>
+            <TableHead>Members</TableHead>
+            <TableHead>Projects</TableHead>
+            <TableHead>Service accts</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {orgs.map((o) => (
+            <TableRow key={o.id}>
+              <TableCell className="font-medium">{o.name}</TableCell>
+              <TableCell>
+                <Badge variant="secondary">{o.type}</Badge>
+              </TableCell>
+              <TableCell>{o._count.memberships}</TableCell>
+              <TableCell>{o._count.projects}</TableCell>
+              <TableCell>{o._count.serviceAccounts}</TableCell>
+              <TableCell>
+                {o.status === 'active' ? (
+                  <Badge>active</Badge>
+                ) : (
+                  <Badge variant="secondary">{o.status}</Badge>
+                )}
+              </TableCell>
+              <TableCell className="text-right">
+                <Button
+                  variant={o.status === 'suspended' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => toggle(o)}
                 >
-                  <option value="human">human</option>
-                  <option value="service">service</option>
-                </select>
+                  {o.status === 'suspended' ? 'Unsuspend' : 'Suspend'}
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function SystemTab() {
+  const [health, setHealth] = useState<Health | null>(null);
+  const [error, setError] = useState('');
+  const [rotating, setRotating] = useState(false);
+  const [rotateResult, setRotateResult] = useState<string | null>(null);
+
+  async function refreshHealth() {
+    setError('');
+    try {
+      setHealth(await getHealth());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load health');
+    }
+  }
+
+  useEffect(() => {
+    void refreshHealth();
+  }, []);
+
+  async function handleRotate() {
+    setError('');
+    setRotating(true);
+    setRotateResult(null);
+    try {
+      const res = await rotateKeys();
+      setRotateResult(
+        `Rotated ${res.rotated} secret version(s) to ${res.activeVersion}` +
+          (res.failed.length ? `, ${res.failed.length} failed` : ''),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Rotation failed');
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  function dot(up: boolean) {
+    return (
+      <span
+        className={`inline-block w-2 h-2 rounded-full ${up ? 'bg-green-500' : 'bg-red-500'}`}
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4 max-w-xl">
+      {error && <p className="text-sm text-red-500">{error}</p>}
+
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-medium">Health</h3>
+            <Button variant="ghost" size="sm" onClick={refreshHealth}>
+              Refresh
+            </Button>
+          </div>
+          {health ? (
+            <div className="flex flex-col gap-2 text-sm">
+              <div className="flex items-center gap-2">
+                {dot(health.database)} Database
+              </div>
+              <div className="flex items-center gap-2">
+                {dot(health.cache)} Cache (Redis)
               </div>
             </div>
-            <DialogFooter>
-              <Button onClick={handleCreate} disabled={!name.trim()}>
-                Create
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">Loading...</p>
+          )}
+        </CardContent>
+      </Card>
 
-      {error && <p className="text-sm text-red-500 mb-2">{error}</p>}
-      {loading && <p className="text-muted-foreground">Loading...</p>}
-
-      <div className="flex flex-col gap-2">
-        {identities.map((i) => (
-          <Card
-            key={i.id}
-            className="cursor-pointer hover:border-primary transition-colors"
-            onClick={() => onSelect(i)}
-          >
-            <CardContent className="flex items-center justify-between py-4">
-              <div className="flex items-center gap-3">
-                <span className="font-medium">{i.name}</span>
-                <Badge variant="secondary">{i.type}</Badge>
-                {i.isSuperadmin && <Badge>superadmin</Badge>}
-              </div>
-              <span className="text-sm text-muted-foreground">
-                manage →
-              </span>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium">Key rotation</h3>
+              <p className="text-sm text-muted-foreground">
+                Re-wraps data keys onto the active master key. Secret values are
+                never touched.
+              </p>
+            </div>
+            <Button onClick={handleRotate} disabled={rotating}>
+              {rotating ? 'Rotating...' : 'Rotate keys'}
+            </Button>
+          </div>
+          {rotateResult && (
+            <p className="text-sm text-green-600 mt-3">{rotateResult}</p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

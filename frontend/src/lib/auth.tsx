@@ -10,16 +10,21 @@ import { api, getToken, setToken, clearToken } from './api';
 export interface Identity {
   id: string;
   name: string;
+  email: string | null;
   type: string;
   isSuperadmin: boolean;
+  serviceOrganizationId: string | null;
+  authMethod: 'token' | 'session';
 }
 
 interface AuthContextValue {
   identity: Identity | null;
   isAuthenticated: boolean;
   loading: boolean;
-  login: (token: string) => Promise<void>;
-  logout: () => void;
+  loginWithToken: (token: string) => Promise<void>;
+  loginWithPassword: (email: string, password: string) => Promise<void>;
+  signup: (name: string, email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -41,7 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
-  async function login(token: string) {
+  async function loginWithToken(token: string) {
     setToken(token);
     try {
       const me = await api<Identity>('/auth/me');
@@ -53,9 +58,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  function logout() {
-    clearToken();
-    setIdentity(null);
+  async function loginWithPassword(email: string, password: string) {
+    const res = await api<{ sessionToken: string; identity: Identity }>(
+      '/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      },
+    );
+    setToken(res.sessionToken);
+    setIdentity(res.identity);
+  }
+
+  async function signup(name: string, email: string, password: string) {
+    const res = await api<{ sessionToken: string; identity: Identity }>(
+      '/signup',
+      {
+        method: 'POST',
+        body: JSON.stringify({ name, email, password }),
+      },
+    );
+    setToken(res.sessionToken);
+    setIdentity(res.identity);
+  }
+
+  async function logout() {
+    // Browser-сесію відкликаємо на бекенді (M2), щоб вкрадений sess_-токен не
+    // лишався валідним до кінця TTL. Спершу revoke (поки токен ще в localStorage),
+    // потім чистимо локально. Помилку ковтаємо — локальний logout робимо завжди;
+    // бекенд усе одно відхилятиме сесію, якщо її таки відкликали.
+    try {
+      if (identity?.authMethod === 'session') {
+        await api('/auth/session', { method: 'DELETE' });
+      }
+    } catch {
+      // ignore — clear local state regardless of revoke outcome
+    } finally {
+      clearToken();
+      setIdentity(null);
+    }
   }
 
   return (
@@ -64,7 +105,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         identity,
         isAuthenticated: !!identity,
         loading,
-        login,
+        loginWithToken,
+        loginWithPassword,
+        signup,
         logout,
       }}
     >

@@ -1,9 +1,24 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
-import { AuthorizationService, Role } from '../auth/authorization.service';
+import {
+  AuthorizationService,
+  ProjectPermission,
+} from '../auth/authorization.service';
 import { AuditService } from '../audit/audit.service';
+import { AuthPrincipal } from '../auth/auth.types';
+import { parseDotenv } from './dotenv';
+
+// Скільки секретів дозволяємо в одному імпорті — захист від випадкового
+// величезного вводу (одна транзакція робить послідовні записи).
+const IMPORT_LIMIT = 500;
 
 @Injectable()
 export class SecretsService {
@@ -14,116 +29,598 @@ export class SecretsService {
     private audit: AuditService,
   ) {}
 
+  // Дозволи актора в цьому оточенні — фронт ховає кнопки дій, яких немає.
+  // Це лише підказка для UI; самі дії гейтить checkProjectAccess на кожному виклику.
+  async capabilities(actor: AuthPrincipal, environmentId: string) {
+    const env = await this.getEnvironmentOrThrow(environmentId);
+    const caps = await this.authz.resolveCapabilities(
+      actor,
+      env.projectId,
+      environmentId,
+    );
+    return {
+      canReveal: caps.revealSecrets,
+      canCreate: caps.createSecrets,
+      canUpdate: caps.updateSecrets,
+      canDelete: caps.deleteSecrets,
+      canRollback: caps.rollbackSecrets,
+    };
+  }
+
   private async getEnvironmentOrThrow(environmentId: string) {
     const env = await this.prisma.environment.findUnique({
       where: { id: environmentId },
+      include: { project: true },
     });
     if (!env) throw new NotFoundException('Environment not found');
     return env;
   }
 
   private async authorize(
-    identityId: string,
+    actor: AuthPrincipal,
     environmentId: string,
-    requiredRole: Role,
+    permission: ProjectPermission,
   ) {
     const env = await this.getEnvironmentOrThrow(environmentId);
-    await this.authz.checkAccess(
-      identityId,
+    await this.authz.checkProjectAccess(
+      actor,
       env.projectId,
-      env.name,
-      requiredRole,
+      permission,
+      environmentId,
     );
     return env;
   }
 
+  // Завантажує живий (не видалений) секрет разом з його environment/project.
+  private async getLiveSecretOrThrow(id: string) {
+    const secret = await this.prisma.secret.findUnique({
+      where: { id },
+      include: { environment: { include: { project: true } } },
+    });
+    if (!secret || secret.deletedAt) {
+      throw new NotFoundException('Secret not found');
+    }
+    return secret;
+  }
+
+  private async nextVersion(tx: Prisma.TransactionClient, secretId: string) {
+    const max = await tx.secretVersion.aggregate({
+      where: { secretId },
+      _max: { version: true },
+    });
+    return (max._max.version ?? 0) + 1;
+  }
+
+  // Розшифрування версії з повним AAD-контекстом (org/secretId/versionId/env).
+  // Гілку legacy-vs-v2-vs-v3 обирає CryptoService за encryptionSchemaVersion рядка.
+  private decryptVersion(
+    organizationId: string,
+    secretId: string,
+    environmentId: string,
+    version: {
+      id: string;
+      ciphertext: Uint8Array;
+      valueIv: Uint8Array;
+      valueAuthTag: Uint8Array;
+      encryptedDataKey: Uint8Array;
+      dataKeyIv: Uint8Array;
+      dataKeyAuthTag: Uint8Array;
+      keyVersion: string;
+      encryptionSchemaVersion: number;
+    },
+  ): string {
+    return this.crypto.decrypt(
+      {
+        ciphertext: version.ciphertext,
+        valueIv: version.valueIv,
+        valueAuthTag: version.valueAuthTag,
+        encryptedDataKey: version.encryptedDataKey,
+        dataKeyIv: version.dataKeyIv,
+        dataKeyAuthTag: version.dataKeyAuthTag,
+        keyVersion: version.keyVersion,
+        encryptionSchemaVersion: version.encryptionSchemaVersion,
+      },
+      { organizationId, secretId, secretVersionId: version.id, environmentId },
+    );
+  }
+
   async create(
-    identityId: string,
+    actor: AuthPrincipal,
     environmentId: string,
     key: string,
     value: string,
   ) {
-    const env = await this.authorize(identityId, environmentId, 'developer');
+    const env = await this.authorize(actor, environmentId, 'createSecrets');
 
-    const enc = this.crypto.encrypt(value);
+    // Чи існує секрет з таким ключем (живий або "надгробок")?
+    const existing = await this.prisma.secret.findUnique({
+      where: { environmentId_key: { environmentId, key } },
+    });
+    if (existing && !existing.deletedAt) {
+      throw new ConflictException('Secret with this key already exists');
+    }
 
-    const data: Prisma.SecretUncheckedCreateInput = {
-      key,
+    // Прегенеруємо ID секрету/версії, щоб AAD прив'язалась до тих самих рядків,
+    // у яких конверт буде збережено (значення вже шифрується під цей контекст).
+    const secretId = existing ? existing.id : randomUUID();
+    const secretVersionId = randomUUID();
+    const enc = this.crypto.encrypt(value, {
+      organizationId: env.project.organizationId,
+      secretId,
+      secretVersionId,
       environmentId,
-      ciphertext: enc.ciphertext,
-      valueIv: enc.valueIv,
-      valueAuthTag: enc.valueAuthTag,
-      encryptedDataKey: enc.encryptedDataKey,
-      dataKeyIv: enc.dataKeyIv,
-      dataKeyAuthTag: enc.dataKeyAuthTag,
-      keyVersion: enc.keyVersion,
-    };
-
-    const secret = await this.prisma.secret.create({
-      data,
-      select: { id: true, key: true, environmentId: true, createdAt: true },
     });
 
-    await this.audit.log({
-      actorId: identityId,
-      action: 'secret.create',
-      targetType: 'secret',
-      targetId: secret.id,
-      metadata: { key, projectId: env.projectId, environment: env.name },
+    const secret = await this.prisma.$transaction(async (tx) => {
+      // Якщо є надгробок — оживляємо його, інакше створюємо новий секрет.
+      const base = existing
+        ? existing
+        : await tx.secret.create({
+            data: { id: secretId, key, environmentId, createdById: actor.id },
+          });
+
+      const version = await tx.secretVersion.create({
+        data: {
+          id: secretVersionId,
+          secretId: base.id,
+          version: existing ? await this.nextVersion(tx, base.id) : 1,
+          createdById: actor.id,
+          ...enc,
+        },
+      });
+
+      const updated = await tx.secret.update({
+        where: { id: base.id },
+        data: { currentVersionId: version.id, deletedAt: null },
+        select: {
+          id: true,
+          key: true,
+          environmentId: true,
+          currentVersionId: true,
+          createdAt: true,
+        },
+      });
+
+      // Аудит — у ТІЙ САМІЙ транзакції: збій журналу відкочує секрет і версію.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: env.project.organizationId,
+          projectId: env.projectId,
+          environmentId,
+          action: 'secret.create',
+          targetType: 'secret',
+          targetId: updated.id,
+          metadata: { key, revived: !!existing },
+        },
+        tx,
+      );
+
+      return updated;
     });
 
     return secret;
   }
 
-  async findByEnvironment(identityId: string, environmentId: string) {
-    const env = await this.authorize(identityId, environmentId, 'readonly');
+  // Bulk-імпорт із .env. Парсимо текст, потім в ОДНІЙ транзакції створюємо нові
+  // секрети або дописуємо нову версію до наявних (як update). Кожне значення
+  // шифрується під контекст свого версійного рядка (як у create/update). Один
+  // підсумковий audit-запис на весь імпорт.
+  async importEnv(actor: AuthPrincipal, environmentId: string, content: string) {
+    const env = await this.authorize(actor, environmentId, 'createSecrets');
 
-    const secrets = await this.prisma.secret.findMany({
-      where: { environmentId },
+    const { entries, errors } = parseDotenv(content);
+    if (errors.length > 0) {
+      throw new BadRequestException(errors);
+    }
+    if (entries.length === 0) {
+      throw new BadRequestException('No secrets found in the provided input');
+    }
+    if (entries.length > IMPORT_LIMIT) {
+      throw new BadRequestException(
+        `Too many secrets in one import (max ${IMPORT_LIMIT})`,
+      );
+    }
+
+    const organizationId = env.project.organizationId;
+    const keys = entries.map((e) => e.key);
+
+    // Перезапис наявних ЖИВИХ секретів — це оновлення, тож вимагаємо updateSecrets
+    // додатково до createSecrets (нові ключі покриває createSecrets вище).
+    const liveExisting = await this.prisma.secret.findMany({
+      where: { environmentId, key: { in: keys }, deletedAt: null },
+      select: { key: true },
+    });
+    if (liveExisting.length > 0) {
+      await this.authz.checkProjectAccess(
+        actor,
+        env.projectId,
+        'updateSecrets',
+        environmentId,
+      );
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        let created = 0;
+        let updated = 0;
+
+        for (const { key, value } of entries) {
+          const existing = await tx.secret.findUnique({
+            where: { environmentId_key: { environmentId, key } },
+          });
+
+          // Прегенеруємо ID, щоб AAD прив'язалась до тих самих рядків (як у create).
+          const secretId = existing ? existing.id : randomUUID();
+          const secretVersionId = randomUUID();
+          const enc = this.crypto.encrypt(value, {
+            organizationId,
+            secretId,
+            secretVersionId,
+            environmentId,
+          });
+
+          const base = existing
+            ? existing
+            : await tx.secret.create({
+                data: {
+                  id: secretId,
+                  key,
+                  environmentId,
+                  createdById: actor.id,
+                },
+              });
+
+          const version = await tx.secretVersion.create({
+            data: {
+              id: secretVersionId,
+              secretId: base.id,
+              version: existing ? await this.nextVersion(tx, base.id) : 1,
+              createdById: actor.id,
+              ...enc,
+            },
+          });
+
+          await tx.secret.update({
+            where: { id: base.id },
+            data: { currentVersionId: version.id, deletedAt: null },
+          });
+
+          // Живий секрет → це оновлення; новий або відроджений надгробок → створення.
+          if (existing && !existing.deletedAt) updated++;
+          else created++;
+        }
+
+        await this.audit.logRequired(
+          {
+            actorId: actor.id,
+            organizationId,
+            projectId: env.projectId,
+            environmentId,
+            action: 'secret.import',
+            targetType: 'environment',
+            targetId: environmentId,
+            metadata: { created, updated, total: created + updated, keys },
+          },
+          tx,
+        );
+
+        return { created, updated, total: created + updated };
+      },
+      { timeout: 30000 },
+    );
+  }
+
+  async update(actor: AuthPrincipal, id: string, value: string) {
+    const secret = await this.getLiveSecretOrThrow(id);
+    await this.authz.checkProjectAccess(
+      actor,
+      secret.environment.projectId,
+      'updateSecrets',
+      secret.environmentId,
+    );
+
+    const secretVersionId = randomUUID();
+    const enc = this.crypto.encrypt(value, {
+      organizationId: secret.environment.project.organizationId,
+      secretId: secret.id,
+      secretVersionId,
+      environmentId: secret.environmentId,
     });
 
-    await this.audit.log({
-      actorId: identityId,
-      action: 'secret.read',
-      targetType: 'environment',
-      targetId: environmentId,
-      metadata: {
-        projectId: env.projectId,
-        environment: env.name,
-        count: secrets.length,
+    const result = await this.prisma.$transaction(async (tx) => {
+      const version = await tx.secretVersion.create({
+        data: {
+          id: secretVersionId,
+          secretId: secret.id,
+          version: await this.nextVersion(tx, secret.id),
+          createdById: actor.id,
+          ...enc,
+        },
+      });
+      const updated = await tx.secret.update({
+        where: { id: secret.id },
+        data: { currentVersionId: version.id },
+        select: {
+          id: true,
+          key: true,
+          environmentId: true,
+          currentVersionId: true,
+          updatedAt: true,
+        },
+      });
+
+      // Аудит у тій самій транзакції: збій журналу відкочує нову версію.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: secret.environment.project.organizationId,
+          projectId: secret.environment.projectId,
+          environmentId: secret.environmentId,
+          action: 'secret.version.create', // секрет оновлено — критична мутація
+          targetType: 'secret',
+          targetId: secret.id,
+          metadata: { key: secret.key },
+        },
+        tx,
+      );
+
+      return updated;
+    });
+
+    return result;
+  }
+
+  async listVersions(actor: AuthPrincipal, id: string) {
+    const secret = await this.getLiveSecretOrThrow(id);
+    await this.authz.checkProjectAccess(
+      actor,
+      secret.environment.projectId,
+      'listSecrets',
+      secret.environmentId,
+    );
+
+    const versions = await this.prisma.secretVersion.findMany({
+      where: { secretId: secret.id },
+      orderBy: { version: 'desc' },
+      select: {
+        id: true,
+        version: true,
+        createdById: true,
+        createdAt: true,
+        note: true,
+        keyVersion: true,
       },
     });
+
+    return versions.map((v) => ({
+      ...v,
+      isCurrent: v.id === secret.currentVersionId,
+    }));
+  }
+
+  async rollback(actor: AuthPrincipal, id: string, toVersion: number) {
+    const secret = await this.getLiveSecretOrThrow(id);
+    await this.authz.checkProjectAccess(
+      actor,
+      secret.environment.projectId,
+      'rollbackSecrets',
+      secret.environmentId,
+    );
+
+    const target = await this.prisma.secretVersion.findUnique({
+      where: { secretId_version: { secretId: secret.id, version: toVersion } },
+    });
+    if (!target) throw new NotFoundException('Target version not found');
+
+    // Rollback = нова версія з тим самим значенням, історія лишається чесною.
+    // AAD прив'язує конверт до конкретного версійного рядка, тож просто скопіювати
+    // байти старої версії не можна (інша версія → інша AAD → integrity-failure).
+    // Розшифровуємо цільову версію (плейнтекст лишається на сервері, назад не
+    // повертається) і перешифровуємо під контекст нової версії. Наслідок: нова
+    // версія завжди пишеться як AAD-схема (v2), навіть якщо ціль була legacy.
+    const plaintext = this.decryptVersion(
+      secret.environment.project.organizationId,
+      secret.id,
+      secret.environmentId,
+      target,
+    );
+    const secretVersionId = randomUUID();
+    const enc = this.crypto.encrypt(plaintext, {
+      organizationId: secret.environment.project.organizationId,
+      secretId: secret.id,
+      secretVersionId,
+      environmentId: secret.environmentId,
+    });
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const version = await tx.secretVersion.create({
+        data: {
+          id: secretVersionId,
+          secretId: secret.id,
+          version: await this.nextVersion(tx, secret.id),
+          createdById: actor.id,
+          note: `rollback to v${toVersion}`,
+          ...enc,
+        },
+      });
+      const updated = await tx.secret.update({
+        where: { id: secret.id },
+        data: { currentVersionId: version.id },
+        select: {
+          id: true,
+          key: true,
+          environmentId: true,
+          currentVersionId: true,
+          updatedAt: true,
+        },
+      });
+
+      // Аудит у тій самій транзакції: збій журналу відкочує rollback.
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: secret.environment.project.organizationId,
+          projectId: secret.environment.projectId,
+          environmentId: secret.environmentId,
+          action: 'secret.rollback',
+          targetType: 'secret',
+          targetId: secret.id,
+          metadata: { key: secret.key, fromVersion: toVersion },
+        },
+        tx,
+      );
+
+      return updated;
+    });
+
+    return result;
+  }
+
+  async findByEnvironment(
+    actor: AuthPrincipal,
+    environmentId: string,
+    reveal = false,
+  ) {
+    const env = await this.authorize(actor, environmentId, 'listSecrets');
+    const canReveal = await this.authz.canAccessProject(
+      actor,
+      env.projectId,
+      'revealSecrets',
+      environmentId,
+    );
+
+    const secrets = await this.prisma.secret.findMany({
+      where: { environmentId, deletedAt: null },
+      include: { currentVersion: true },
+    });
+
+    // Значення повертаємо й логуємо reveal ЛИШЕ коли клієнт явно просить
+    // (CLI / bulk-pull). Звичайне відкриття сторінки — це secret.list, не reveal.
+    const revealValues = reveal && canReveal;
+
+    // secret.list — read-only метадані (ключі без значень): best-effort, не
+    // валимо звичайний перегляд сторінки через збій журналу.
+    await this.audit.logBestEffort({
+      actorId: actor.id,
+      organizationId: env.project.organizationId,
+      projectId: env.projectId,
+      environmentId,
+      action: 'secret.list',
+      targetType: 'environment',
+      targetId: environmentId,
+      metadata: { count: secrets.length, revealed: revealValues },
+    });
+
+    // secret.reveal — критично: пишемо журнал ПЕРЕД розшифруванням значень нижче.
+    // Якщо logRequired кине 503, мапа з decrypt() не виконається — плейнтекст не
+    // покине сервер.
+    if (revealValues) {
+      await this.audit.logRequired({
+        actorId: actor.id,
+        organizationId: env.project.organizationId,
+        projectId: env.projectId,
+        environmentId,
+        action: 'secret.reveal',
+        targetType: 'environment',
+        targetId: environmentId,
+        metadata: { count: secrets.length, bulk: true },
+      });
+    }
 
     return secrets.map((s) => ({
       id: s.id,
       key: s.key,
-      value: this.crypto.decrypt({
-        ciphertext: s.ciphertext,
-        valueIv: s.valueIv,
-        valueAuthTag: s.valueAuthTag,
-        encryptedDataKey: s.encryptedDataKey,
-        dataKeyIv: s.dataKeyIv,
-        dataKeyAuthTag: s.dataKeyAuthTag,
-        keyVersion: s.keyVersion,
-      }),
+      currentVersion: s.currentVersion?.version ?? null,
+      canReveal,
+      value:
+        revealValues && s.currentVersion
+          ? this.decryptVersion(
+              env.project.organizationId,
+              s.id,
+              environmentId,
+              s.currentVersion,
+            )
+          : null,
       createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
     }));
   }
 
-  async remove(identityId: string, id: string) {
-    const secret = await this.prisma.secret.findUnique({ where: { id } });
-    if (!secret) throw new NotFoundException('Secret not found');
+  // Явний reveal одного секрету — це і є момент, коли плейнтекст залишає сервер.
+  async revealOne(actor: AuthPrincipal, id: string) {
+    const secret = await this.prisma.secret.findUnique({
+      where: { id },
+      include: {
+        environment: { include: { project: true } },
+        currentVersion: true,
+      },
+    });
+    if (!secret || secret.deletedAt) {
+      throw new NotFoundException('Secret not found');
+    }
 
-    const env = await this.authorize(identityId, secret.environmentId, 'developer');
+    await this.authz.checkProjectAccess(
+      actor,
+      secret.environment.projectId,
+      'revealSecrets',
+      secret.environmentId,
+    );
 
-    await this.prisma.secret.delete({ where: { id } });
+    if (!secret.currentVersion) return { id: secret.id, value: null };
 
-    await this.audit.log({
-      actorId: identityId,
-      action: 'secret.delete',
+    // Спершу — обов'язковий запис у журнал, і ЛИШЕ потім розшифрування. Якщо
+    // аудит впав (503), плейнтекст не розшифровується й не повертається.
+    await this.audit.logRequired({
+      actorId: actor.id,
+      organizationId: secret.environment.project.organizationId,
+      projectId: secret.environment.projectId,
+      environmentId: secret.environmentId,
+      action: 'secret.reveal',
       targetType: 'secret',
-      targetId: id,
-      metadata: { key: secret.key, projectId: env.projectId, environment: env.name },
+      targetId: secret.id,
+      metadata: { key: secret.key, version: secret.currentVersion.version },
+    });
+
+    const value = this.decryptVersion(
+      secret.environment.project.organizationId,
+      secret.id,
+      secret.environmentId,
+      secret.currentVersion,
+    );
+
+    return { id: secret.id, value };
+  }
+
+  async remove(actor: AuthPrincipal, id: string) {
+    const secret = await this.getLiveSecretOrThrow(id);
+
+    await this.authz.checkProjectAccess(
+      actor,
+      secret.environment.projectId,
+      'deleteSecrets',
+      secret.environmentId,
+    );
+
+    // М'яке видалення + аудит атомарно: збій журналу відкочує видалення.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.secret.update({
+        where: { id },
+        data: { deletedAt: new Date(), currentVersionId: null },
+      });
+      await this.audit.logRequired(
+        {
+          actorId: actor.id,
+          organizationId: secret.environment.project.organizationId,
+          projectId: secret.environment.projectId,
+          environmentId: secret.environmentId,
+          action: 'secret.delete',
+          targetType: 'secret',
+          targetId: id,
+          metadata: { key: secret.key },
+        },
+        tx,
+      );
     });
 
     return { deleted: true };

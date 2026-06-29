@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { spawn } from 'node:child_process';
 import { saveConfig, loadConfig, getApiUrl, getToken } from './config';
+import { buildSecretEnv, type FetchedSecret } from './secrets-env';
 
 const program = new Command();
 
@@ -63,29 +64,35 @@ program
     }
 
     // 1. Тягнемо секрети з API
-    let secrets: Array<{ key: string; value: string }>;
+    let secrets: FetchedSecret[];
     try {
-      const res = await fetch(`${apiUrl}/environments/${opts.env}/secrets`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${apiUrl}/environments/${opts.env}/secrets?reveal=true`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       if (!res.ok) {
         console.error(`✗ Failed to fetch secrets (status ${res.status})`);
         process.exit(1);
       }
-      secrets = await res.json();
+      secrets = (await res.json()) as FetchedSecret[];
     } catch (err) {
       console.error('✗ Cannot reach API');
       console.error(err instanceof Error ? err.message : err);
       process.exit(1);
     }
 
-    // 2. Будуємо оточення: поточне + секрети
-    const childEnv = { ...process.env };
-    for (const s of secrets) {
-      childEnv[s.key] = s.value;
-    }
+    // 2. Будуємо оточення: поточне + лише секрети з реальним значенням.
+    // Секрети з value: null (немає дозволу reveal) пропускаємо — інакше в env
+    // потрапив би рядок "null".
+    const { env: secretEnv, injected, skipped } = buildSecretEnv(secrets);
+    const childEnv = { ...process.env, ...secretEnv };
 
-    console.error(`✓ Injected ${secrets.length} secret(s)`);
+    if (skipped > 0) {
+      console.error(`⚠ Skipped ${skipped} secret(s) without reveal permission.`);
+    }
+    console.error(`✓ Injected ${injected} secret(s)`);
 
     // 3. Запускаємо дочірній процес
     const [cmd, ...args] = commandParts;

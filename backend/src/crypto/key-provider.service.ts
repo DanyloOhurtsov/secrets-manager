@@ -18,7 +18,9 @@ export class KeyProvider {
       }
       const key = Buffer.from(hex.trim(), 'hex');
       if (key.length !== 32) {
-        throw new Error(`Master key ${version} must be 32 bytes (got ${key.length})`);
+        throw new Error(
+          `Master key ${version} must be 32 bytes (got ${key.length})`,
+        );
       }
       this.keys.set(version.trim(), key);
     }
