@@ -74,6 +74,20 @@ export function createSecret(environmentId: string, key: string, value: string) 
   });
 }
 
+export interface ImportResult {
+  created: number;
+  updated: number;
+  total: number;
+}
+
+// Bulk-імпорт із .env: надсилаємо сирий текст, бекенд парсить і створює/оновлює.
+export function importSecrets(environmentId: string, content: string) {
+  return api<ImportResult>(`/environments/${environmentId}/secrets/import`, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  });
+}
+
 export function revealSecret(environmentId: string, secretId: string) {
   return api<{ id: string; value: string | null }>(
     `/environments/${environmentId}/secrets/${secretId}/reveal`,

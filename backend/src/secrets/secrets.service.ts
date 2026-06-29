@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -13,6 +14,11 @@ import {
 } from '../auth/authorization.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthPrincipal } from '../auth/auth.types';
+import { parseDotenv } from './dotenv';
+
+// Скільки секретів дозволяємо в одному імпорті — захист від випадкового
+// величезного вводу (одна транзакція робить послідовні записи).
+const IMPORT_LIMIT = 500;
 
 @Injectable()
 export class SecretsService {
@@ -194,6 +200,115 @@ export class SecretsService {
     });
 
     return secret;
+  }
+
+  // Bulk-імпорт із .env. Парсимо текст, потім в ОДНІЙ транзакції створюємо нові
+  // секрети або дописуємо нову версію до наявних (як update). Кожне значення
+  // шифрується під контекст свого версійного рядка (як у create/update). Один
+  // підсумковий audit-запис на весь імпорт.
+  async importEnv(actor: AuthPrincipal, environmentId: string, content: string) {
+    const env = await this.authorize(actor, environmentId, 'createSecrets');
+
+    const { entries, errors } = parseDotenv(content);
+    if (errors.length > 0) {
+      throw new BadRequestException(errors);
+    }
+    if (entries.length === 0) {
+      throw new BadRequestException('No secrets found in the provided input');
+    }
+    if (entries.length > IMPORT_LIMIT) {
+      throw new BadRequestException(
+        `Too many secrets in one import (max ${IMPORT_LIMIT})`,
+      );
+    }
+
+    const organizationId = env.project.organizationId;
+    const keys = entries.map((e) => e.key);
+
+    // Перезапис наявних ЖИВИХ секретів — це оновлення, тож вимагаємо updateSecrets
+    // додатково до createSecrets (нові ключі покриває createSecrets вище).
+    const liveExisting = await this.prisma.secret.findMany({
+      where: { environmentId, key: { in: keys }, deletedAt: null },
+      select: { key: true },
+    });
+    if (liveExisting.length > 0) {
+      await this.authz.checkProjectAccess(
+        actor,
+        env.projectId,
+        'updateSecrets',
+        environmentId,
+      );
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        let created = 0;
+        let updated = 0;
+
+        for (const { key, value } of entries) {
+          const existing = await tx.secret.findUnique({
+            where: { environmentId_key: { environmentId, key } },
+          });
+
+          // Прегенеруємо ID, щоб AAD прив'язалась до тих самих рядків (як у create).
+          const secretId = existing ? existing.id : randomUUID();
+          const secretVersionId = randomUUID();
+          const enc = this.crypto.encrypt(value, {
+            organizationId,
+            secretId,
+            secretVersionId,
+            environmentId,
+          });
+
+          const base = existing
+            ? existing
+            : await tx.secret.create({
+                data: {
+                  id: secretId,
+                  key,
+                  environmentId,
+                  createdById: actor.id,
+                },
+              });
+
+          const version = await tx.secretVersion.create({
+            data: {
+              id: secretVersionId,
+              secretId: base.id,
+              version: existing ? await this.nextVersion(tx, base.id) : 1,
+              createdById: actor.id,
+              ...enc,
+            },
+          });
+
+          await tx.secret.update({
+            where: { id: base.id },
+            data: { currentVersionId: version.id, deletedAt: null },
+          });
+
+          // Живий секрет → це оновлення; новий або відроджений надгробок → створення.
+          if (existing && !existing.deletedAt) updated++;
+          else created++;
+        }
+
+        await this.audit.logRequired(
+          {
+            actorId: actor.id,
+            organizationId,
+            projectId: env.projectId,
+            environmentId,
+            action: 'secret.import',
+            targetType: 'environment',
+            targetId: environmentId,
+            metadata: { created, updated, total: created + updated, keys },
+          },
+          tx,
+        );
+
+        return { created, updated, total: created + updated };
+      },
+      { timeout: 30000 },
+    );
   }
 
   async update(actor: AuthPrincipal, id: string, value: string) {

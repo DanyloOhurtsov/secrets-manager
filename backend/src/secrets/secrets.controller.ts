@@ -11,7 +11,12 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { SecretsService } from './secrets.service';
 import { CurrentIdentity } from '../auth/current-identity.decorator';
-import { CreateSecretDto, RollbackSecretDto, UpdateSecretDto } from './dto';
+import {
+  CreateSecretDto,
+  ImportSecretsDto,
+  RollbackSecretDto,
+  UpdateSecretDto,
+} from './dto';
 import type { AuthPrincipal } from '../auth/auth.types';
 
 @Controller('environments/:environmentId/secrets')
@@ -30,6 +35,18 @@ export class SecretsController {
       body.key,
       body.value,
     );
+  }
+
+  // Bulk-імпорт з .env: парсимо текст на сервері й створюємо/оновлюємо багато
+  // секретів в одній транзакції. Статичний маршрут (не конфліктує з ':id').
+  @Post('import')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  importEnv(
+    @CurrentIdentity() identity: AuthPrincipal,
+    @Param('environmentId') environmentId: string,
+    @Body() body: ImportSecretsDto,
+  ) {
+    return this.secretsService.importEnv(identity, environmentId, body.content);
   }
 
   // Статичний маршрут — оголошуємо перед параметричними (':id/...'), щоб

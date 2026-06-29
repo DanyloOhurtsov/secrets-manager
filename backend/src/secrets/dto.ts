@@ -21,3 +21,10 @@ export class RollbackSecretDto {
   @Min(1)
   toVersion: number;
 }
+
+export class ImportSecretsDto {
+  // Сирий текст .env (paste або вміст завантаженого файлу) — парситься на сервері.
+  @IsString()
+  @IsNotEmpty()
+  content: string;
+}

@@ -37,6 +37,7 @@ export function ProjectDetail({
     getCapabilities,
     loadCapabilities,
     createSecret,
+    importSecrets,
     updateSecret,
     rollbackSecret,
     loadVersions,
@@ -171,6 +172,7 @@ export function ProjectDetail({
                 secrets={getSecrets(env.id)}
                 capabilities={getCapabilities(env.id)}
                 onAdd={(key, value) => createSecret(env.id, key, value)}
+                onImport={(content) => importSecrets(env.id, content)}
                 onUpdate={(id, value) => updateSecret(env.id, id, value)}
                 onRollback={(id, toVersion) =>
                   rollbackSecret(env.id, id, toVersion)

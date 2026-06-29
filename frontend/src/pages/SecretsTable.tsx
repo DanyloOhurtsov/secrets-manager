@@ -8,11 +8,14 @@ import {
   MoreHorizontal,
   Pencil,
   Trash2,
+  Upload,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import {
   type Secret,
   type SecretVersion,
   type EnvironmentCapabilities,
+  type ImportResult,
 } from '@/lib/secrets';
 import { notifyError } from '@/lib/errors';
 import { cn } from '@/lib/utils';
@@ -45,6 +48,7 @@ interface SecretsTableProps {
   secrets: Secret[] | undefined;
   capabilities: EnvironmentCapabilities | undefined;
   onAdd: (key: string, value: string) => Promise<void>;
+  onImport: (content: string) => Promise<ImportResult>;
   onUpdate: (id: string, value: string) => Promise<void>;
   onRollback: (id: string, toVersion: number) => Promise<void>;
   onLoadVersions: (id: string) => Promise<SecretVersion[]>;
@@ -56,6 +60,7 @@ export function SecretsTable({
   secrets,
   capabilities,
   onAdd,
+  onImport,
   onUpdate,
   onRollback,
   onLoadVersions,
@@ -68,6 +73,7 @@ export function SecretsTable({
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<Secret | null>(null);
   const [history, setHistory] = useState<Secret | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
 
   async function run(fn: () => Promise<unknown>) {
     try {
@@ -114,7 +120,7 @@ export function SecretsTable({
   return (
     <div>
       {capabilities?.canCreate && (
-        <div className="flex gap-2 mb-4">
+        <div className="flex items-center gap-2 mb-4">
           <Input
             placeholder="KEY"
             value={newKey}
@@ -131,6 +137,14 @@ export function SecretsTable({
             disabled={busy || !newKey.trim() || !newValue}
           >
             Add
+          </Button>
+          <Button
+            variant="outline"
+            className="ml-auto"
+            onClick={() => setImportOpen(true)}
+          >
+            <Upload />
+            Import .env
           </Button>
         </div>
       )}
@@ -243,6 +257,13 @@ export function SecretsTable({
         </div>
       )}
 
+      {importOpen && (
+        <ImportEnvDialog
+          onImport={onImport}
+          onClose={() => setImportOpen(false)}
+        />
+      )}
+
       {editing && (
         <EditSecretDialog
           secret={editing}
@@ -315,6 +336,77 @@ function CopyKeyButton({ secretKey }: { secretKey: string }) {
         <Copy />
       )}
     </Button>
+  );
+}
+
+function ImportEnvDialog({
+  onImport,
+  onClose,
+}: {
+  onImport: (content: string) => Promise<ImportResult>;
+  onClose: () => void;
+}) {
+  const [content, setContent] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      const res = await onImport(content);
+      toast.success(
+        `Imported ${res.total} secret${res.total === 1 ? '' : 's'} ` +
+          `(${res.created} new, ${res.updated} updated)`,
+      );
+      onClose();
+    } catch (err) {
+      notifyError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Import from .env</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">
+          Paste the contents of a .env file (or upload one). New keys are created;
+          existing keys get a new version. Values never touch disk on the server.
+        </p>
+        <textarea
+          autoFocus
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder={'DATABASE_URL=postgres://...\nAPI_KEY=sk-...'}
+          rows={10}
+          className="w-full rounded-md border bg-transparent p-3 font-mono text-sm"
+        />
+        <div>
+          <input
+            type="file"
+            accept=".env,.txt,text/plain"
+            className="text-sm text-muted-foreground"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) file.text().then(setContent).catch(notifyError);
+            }}
+          />
+        </div>
+        <DialogFooter>
+          <Button
+            disabled={busy || !content.trim()}
+            onClick={() => void submit()}
+          >
+            Import
+          </Button>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

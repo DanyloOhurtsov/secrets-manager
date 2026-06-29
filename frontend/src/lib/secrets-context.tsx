@@ -13,6 +13,7 @@ import {
   listSecrets as apiListSecrets,
   getEnvironmentCapabilities as apiGetCapabilities,
   createSecret as apiCreateSecret,
+  importSecrets as apiImportSecrets,
   updateSecret as apiUpdateSecret,
   rollbackSecret as apiRollbackSecret,
   listSecretVersions as apiListVersions,
@@ -21,6 +22,7 @@ import {
   type Secret,
   type SecretVersion,
   type EnvironmentCapabilities,
+  type ImportResult,
 } from './secrets';
 import type { Environment } from './projects';
 
@@ -38,6 +40,7 @@ interface SecretsContextValue {
   getCapabilities: (envId: string) => EnvironmentCapabilities | undefined;
   loadCapabilities: (envId: string) => Promise<void>;
   createSecret: (envId: string, key: string, value: string) => Promise<void>;
+  importSecrets: (envId: string, content: string) => Promise<ImportResult>;
   updateSecret: (envId: string, id: string, value: string) => Promise<void>;
   rollbackSecret: (envId: string, id: string, toVersion: number) => Promise<void>;
   loadVersions: (envId: string, id: string) => Promise<SecretVersion[]>;
@@ -152,6 +155,15 @@ export function SecretsProvider({ children }: { children: ReactNode }) {
     setSecretsByEnv((prev) => ({ ...prev, [envId]: secrets }));
   }, []);
 
+  const importSecrets = useCallback(
+    async (envId: string, content: string) => {
+      const res = await apiImportSecrets(envId, content);
+      await refresh(envId);
+      return res;
+    },
+    [refresh],
+  );
+
   const updateSecret = useCallback(
     async (envId: string, id: string, value: string) => {
       await apiUpdateSecret(envId, id, value);
@@ -201,6 +213,7 @@ export function SecretsProvider({ children }: { children: ReactNode }) {
         getCapabilities,
         loadCapabilities,
         createSecret,
+        importSecrets,
         updateSecret,
         rollbackSecret,
         loadVersions,
