@@ -343,7 +343,11 @@ export function OrgAccess({
             Token-only machine identities pinned to this organization.
           </p>
         </div>
-        <ServiceAccountsTab orgId={org.id} isAdmin={isAdmin} />
+        <ServiceAccountsTab
+          orgId={org.id}
+          isAdmin={isAdmin}
+          onChanged={loadAccess}
+        />
       </section>
 
       {/* GRANTS */}

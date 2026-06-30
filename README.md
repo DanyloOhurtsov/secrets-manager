@@ -62,6 +62,15 @@ npm run build
 npm link          # puts `secrets` on your PATH (undo later with `npm unlink -g`)
 ```
 
+Verify the global command:
+
+```bash
+secrets --version
+```
+
+On Windows, `npm link` creates both PowerShell (`secrets.ps1`) and Command Prompt
+(`secrets.cmd`) shims. The current CLI supports either one.
+
 ### 5. Create a CI token (service account)
 
 Secret **values** are only readable through an explicit grant — even for you. To let a
@@ -72,8 +81,10 @@ machine (CI) read them, create a service account and grant it access:
 3. Under **Project & environment access**, click **Grant access** → pick
    `ci · service`, your project, scope **whole project**, role **reader**
    (list + reveal) → **Grant**.
-4. Back under **Service accounts** → your account → **Tokens** → **Issue** →
-   copy the `sm_…` token (shown once).
+4. Back under **Service accounts**, click **Tokens** on the `ci` account.
+   Optionally enter a label, click **Issue**, then copy the `sm_…` token
+   (shown once). **Issue** is the button that creates a new token; it is not a
+   separate page.
 
 Log the CLI in with that token:
 
@@ -94,16 +105,76 @@ curl -s http://localhost:3000/projects -H "Authorization: Bearer sm_xxxxxxxx" \
   | jq '.[] | {project: .name, environments: [.environments[] | {name, id}]}'
 ```
 
+PowerShell equivalent, using the token already saved by `secrets login` without
+printing it:
+
+```powershell
+$config = Get-Content "$HOME\.secrets-manager\config.json" | ConvertFrom-Json
+$api = if ($env:SECRETS_API_URL) {
+  $env:SECRETS_API_URL
+} elseif ($config.apiUrl) {
+  $config.apiUrl
+} else {
+  "http://localhost:3000"
+}
+$token = if ($env:SECRETS_TOKEN) { $env:SECRETS_TOKEN } else { $config.token }
+
+Invoke-RestMethod "$api/projects" -Headers @{
+  Authorization = "Bearer $token"
+} | ConvertTo-Json -Depth 6
+```
+
 Grab the `id` of your `dev` environment, then:
 
 ```bash
 secrets run -e <environmentId> -- your-app-command
 # e.g.
-secrets run -e 1a2b3c4d-... -- node -e "console.log('DB is', process.env.DATABASE_URL)"
+secrets run -e 1a2b3c4d-... -- node -e "console.log('DATABASE_URL present:', Boolean(process.env.DATABASE_URL))"
 ```
 
 `secrets run` fetches the secrets, injects them into the child process's environment
-(never to disk), forwards its exit code, and **never prints the values**.
+(never to disk), and forwards its exit code. The CLI itself never prints secret
+values, but the child process can — avoid logging `process.env` or individual secret
+values.
+
+#### Windows PowerShell
+
+The same `secrets run ... -- ...` command works in the current CLI. PowerShell may
+consume `--` before invoking npm's `secrets.ps1` shim, so the CLI also treats every
+argument after the child executable as belonging to the child. This keeps child flags
+such as `node -e` from being mistaken for the CLI's `-e, --env` option. The CLI also
+launches Windows package-manager shims (`npm`, `npx`, `pnpm`, and `yarn`) through
+`cmd.exe`, so commands such as this work unchanged:
+
+```powershell
+secrets run -e <environmentId> -- npm start
+```
+
+If an older checkout returns `404` when the child command has an `-e` option, or
+`spawn npm ENOENT` for an npm script, rebuild and relink the current CLI:
+
+```powershell
+npm run build
+npm link
+```
+
+As a temporary workaround for that older CLI, invoke npm's native Windows shim
+explicitly:
+
+```powershell
+secrets.cmd run -e <environmentId> -- node -e "console.log('DATABASE_URL present:', Boolean(process.env.DATABASE_URL))"
+secrets.cmd run -e <environmentId> -- npm.cmd start
+```
+
+#### Troubleshooting `secrets run`
+
+- **404** — use an `environments[].id` returned by `GET /projects`, not the project
+  ID, and confirm the token's service account has a grant for that project/environment.
+  A **reader** grant can list and reveal values.
+- **401** — the saved token is invalid or revoked; issue a new token and run
+  `secrets login` again.
+- **Injected 0 secrets** — confirm the environment contains secrets and the grant can
+  reveal them. The CLI reports how many non-revealable secrets it skipped.
 
 Done — you went from clone to a running app with injected secrets.
 

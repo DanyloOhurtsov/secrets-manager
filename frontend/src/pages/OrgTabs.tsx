@@ -42,9 +42,11 @@ const selectClass = "border rounded-md h-9 px-3 text-sm bg-transparent";
 export function ServiceAccountsTab({
   orgId,
   isAdmin,
+  onChanged,
 }: {
   orgId: string;
   isAdmin: boolean;
+  onChanged?: () => void | Promise<void>;
 }) {
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
   const [error, setError] = useState("");
@@ -69,6 +71,7 @@ export function ServiceAccountsTab({
     try {
       await fn();
       await load();
+      await onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Action failed");
     }
