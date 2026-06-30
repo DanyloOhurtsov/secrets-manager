@@ -42,7 +42,7 @@ When it settles you have:
 3. **New environment** (e.g. `dev`).
 
 > **Single user?** Ignore the org switcher in the top bar, the **Platform** button
-> (superadmin tooling), and the *Members/roles* parts of the **Access** tab. You only
+> (superadmin tooling), and the _Members/roles_ parts of the **Access** tab. You only
 > need **Projects** — plus the **Access** tab for the CLI/CI step below.
 
 ### 3. Import your existing `.env`
@@ -71,42 +71,57 @@ secrets --version
 On Windows, `npm link` creates both PowerShell (`secrets.ps1`) and Command Prompt
 (`secrets.cmd`) shims. The current CLI supports either one.
 
-### 5. Create a CI token (service account)
+### 5. Create a service account token
 
 Secret **values** are only readable through an explicit grant — even for you. To let a
-machine (CI) read them, create a service account and grant it access:
+local process or CI job read them, create a service account and grant it access:
 
 1. In the UI, open your workspace → **Access** tab.
-2. Under **Service accounts**, create one (e.g. `ci`).
-3. Under **Project & environment access**, click **Grant access** → pick
-   `ci · service`, your project, scope **whole project**, role **reader**
-   (list + reveal) → **Grant**.
-4. Back under **Service accounts**, click **Tokens** on the `ci` account.
-   Optionally enter a label, click **Issue**, then copy the `sm_…` token
-   (shown once). **Issue** is the button that creates a new token; it is not a
-   separate page.
+2. Under **Service accounts**, create one (e.g. `local-dev` or `ci`).
+3. Under **Project & environment access**, click **Grant access** → pick the new
+   service account, your project, the required environment (recommended) or
+   **whole project**, and role **reader** (list + reveal) → **Grant**.
+4. Back under **Service accounts**, click **Tokens** on the new account. Optionally
+   enter a label, click **Issue**, then copy the `sm_…` token (shown once).
+   **Issue** creates a token; it is not a separate page.
 
-Log the CLI in with that token:
+For local development, save the token in the CLI config:
 
 ```bash
 secrets login --token sm_xxxxxxxx     # API defaults to http://localhost:3000
 ```
 
+The token is a credential: do not commit it, paste it into logs, or expose it to
+browser code. For CI, use `SECRETS_TOKEN` instead of `secrets login`; see
+[CI and deployment](#ci-and-deployment).
+
 ### 6. Run your app with secrets injected
 
-The `secrets run` command needs the **environment ID**. Your token can list the
-projects/environments it can reach:
+`secrets run` starts another process and adds the selected environment's secrets to
+that process. Your application keeps reading configuration normally:
+
+```js
+const databaseUrl = process.env.DATABASE_URL;
+```
+
+The CLI does not create a `.env` file. Secrets exist only in the started process and
+its child processes. Values from Secrets Manager override existing variables with the
+same names.
+
+#### 6.1 Find the environment ID
+
+Use the service account token to list only the projects and environments it can
+access.
+
+macOS/Linux:
 
 ```bash
 curl -s http://localhost:3000/projects \
-  -H "Authorization: Bearer sm_xxxxxxxx"
-# (with jq:)
-curl -s http://localhost:3000/projects -H "Authorization: Bearer sm_xxxxxxxx" \
+  -H "Authorization: Bearer sm_xxxxxxxx" \
   | jq '.[] | {project: .name, environments: [.environments[] | {name, id}]}'
 ```
 
-PowerShell equivalent, using the token already saved by `secrets login` without
-printing it:
+PowerShell (reads the token already saved by `secrets login` without printing it):
 
 ```powershell
 $config = Get-Content "$HOME\.secrets-manager\config.json" | ConvertFrom-Json
@@ -124,57 +139,119 @@ Invoke-RestMethod "$api/projects" -Headers @{
 } | ConvertTo-Json -Depth 6
 ```
 
-Grab the `id` of your `dev` environment, then:
+Copy the required value from `environments[].id`. Do not use the project `id`.
+
+#### 6.2 Start the application from its own directory
+
+Change to the application directory — not the Secrets Manager `cli` directory — and
+wrap its normal start command:
 
 ```bash
-secrets run -e <environmentId> -- your-app-command
-# e.g.
-secrets run -e 1a2b3c4d-... -- node -e "console.log('DATABASE_URL present:', Boolean(process.env.DATABASE_URL))"
+cd /path/to/your-application
+secrets run -e <environmentId> -- npm run dev
 ```
 
-`secrets run` fetches the secrets, injects them into the child process's environment
-(never to disk), and forwards its exit code. The CLI itself never prints secret
-values, but the child process can — avoid logging `process.env` or individual secret
-values.
+Any executable works:
+
+```bash
+secrets run -e <environmentId> -- node dist/main.js
+secrets run -e <environmentId> -- python app.py
+secrets run -e <environmentId> -- npm start
+```
+
+To verify injection without revealing a value:
+
+```bash
+secrets run -e <environmentId> -- node -e "console.log('DATABASE_URL present:', Boolean(process.env.DATABASE_URL))"
+```
+
+The CLI reports the number of injected secrets and forwards the child process's exit
+code. The CLI itself never prints secret values, but the application can — do not log
+`process.env` or individual credentials.
+
+#### Next.js example
+
+The Secrets Manager API already uses port `3000`. If Next.js runs on the same machine,
+choose another port:
+
+```bash
+# Development (does not require a production build)
+secrets run -e <environmentId> -- npm run dev -- -p 3001
+
+# Production
+secrets run -e <environmentId> -- npm run build
+secrets run -e <environmentId> -- npm start -- -p 3001
+```
+
+Do not store `NODE_ENV` in Secrets Manager; let Next.js set it. Never put private
+values in `NEXT_PUBLIC_*` variables because Next.js includes those in the browser
+bundle.
 
 #### Windows PowerShell
 
-The same `secrets run ... -- ...` command works in the current CLI. PowerShell may
-consume `--` before invoking npm's `secrets.ps1` shim, so the CLI also treats every
-argument after the child executable as belonging to the child. This keeps child flags
-such as `node -e` from being mistaken for the CLI's `-e, --env` option. The CLI also
-launches Windows package-manager shims (`npm`, `npx`, `pnpm`, and `yarn`) through
-`cmd.exe`, so commands such as this work unchanged:
+The same `secrets run ... -- ...` syntax works in PowerShell. The CLI forwards child
+flags such as `node -e` correctly and launches Windows package-manager shims (`npm`,
+`npx`, `pnpm`, and `yarn`) through `cmd.exe`:
 
 ```powershell
 secrets run -e <environmentId> -- npm start
 ```
 
-If an older checkout returns `404` when the child command has an `-e` option, or
-`spawn npm ENOENT` for an npm script, rebuild and relink the current CLI:
+After pulling CLI changes, rebuild and relink from the `cli` directory:
 
 ```powershell
+cd C:\path\to\secrets-manager\cli
+npm install
 npm run build
 npm link
 ```
 
-As a temporary workaround for that older CLI, invoke npm's native Windows shim
-explicitly:
+If an older build returns `spawn npm ENOENT`, invoke npm's native Windows shim while
+you update:
 
 ```powershell
-secrets.cmd run -e <environmentId> -- node -e "console.log('DATABASE_URL present:', Boolean(process.env.DATABASE_URL))"
 secrets.cmd run -e <environmentId> -- npm.cmd start
 ```
 
-#### Troubleshooting `secrets run`
+### 7. CI and deployment
 
-- **404** — use an `environments[].id` returned by `GET /projects`, not the project
-  ID, and confirm the token's service account has a grant for that project/environment.
-  A **reader** grant can list and reveal values.
-- **401** — the saved token is invalid or revoked; issue a new token and run
-  `secrets login` again.
-- **Injected 0 secrets** — confirm the environment contains secrets and the grant can
-  reveal them. The CLI reports how many non-revealable secrets it skipped.
+Do not run `secrets login` in CI. Store these as protected variables in the CI
+platform:
+
+```dotenv
+SECRETS_API_URL=https://secrets.example.com
+SECRETS_TOKEN=sm_xxxxxxxx
+ENVIRONMENT_ID=<environmentId>
+```
+
+Then wrap the application command:
+
+```bash
+secrets run -e "$ENVIRONMENT_ID" -- npm start
+```
+
+Use a dedicated service account per application or deployment context, grant only the
+required environment, and rotate/revoke its tokens independently. The application
+receives a snapshot at startup, so restart it after changing or rotating secrets.
+
+### Troubleshooting `secrets run`
+
+| Symptom                        | Meaning                                                        | Fix                                                                                    |
+| ------------------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `401`                          | Token is invalid or revoked.                                   | Issue a new token and run `secrets login` again (or update `SECRETS_TOKEN` in CI).     |
+| `404` while fetching secrets   | Wrong environment ID, or the service account cannot access it. | Use an `environments[].id` returned by `GET /projects` and check the grant.            |
+| `Injected 0 secrets`           | The environment is empty, or the grant cannot reveal values.   | Add secrets and use a `reader` grant or another role with reveal permission.           |
+| `spawn npm ENOENT` on Windows  | An old CLI build tried to execute the `npm.cmd` shim directly. | Pull the current CLI, run `npm install`, `npm run build`, and `npm link` from `cli/`.  |
+| `UV_HANDLE_CLOSING` on Windows | An old CLI forced Node to exit while handles were closing.     | Rebuild/relink the current CLI; diagnose the preceding error, which is the root cause. |
+| `EADDRINUSE ... :3000`         | The app and Secrets Manager API both want port `3000`.         | Start the app on another port, such as `3001`.                                         |
+| Next.js cannot find `.next`    | `next start` was used before a production build.               | Run `secrets run -e <id> -- npm run build`, then start the app.                        |
+| `ECONNREFUSED` for Postgres    | Nothing is listening at the host/port in `DATABASE_URL`.       | Start the application's database or correct `DATABASE_URL`, then restart the app.      |
+| Next.js warns about `NODE_ENV` | A non-standard value was injected.                             | Remove `NODE_ENV` from Secrets Manager and let Next.js manage it.                      |
+
+`DATABASE_URL` is passed to the application exactly as stored. Secrets Manager does
+not start the application's database. If the application runs on the host, a URL with
+`localhost:<published-port>` can be correct; inside Docker, use the database service
+hostname and its internal port instead.
 
 Done — you went from clone to a running app with injected secrets.
 
@@ -195,15 +272,15 @@ MASTER_KEYS=v1:<64 hex chars>
 ACTIVE_KEY_VERSION=v1
 ```
 
-| Variable             | Where        | Notes                                                                 |
-| -------------------- | ------------ | --------------------------------------------------------------------- |
-| `MASTER_KEYS`        | backend      | `version:hex` entries, each 32 bytes hex. **Change the dev default.** |
-| `ACTIVE_KEY_VERSION` | backend      | Which key version new secrets are wrapped with.                       |
-| `DATABASE_URL`       | backend      | Postgres connection. Set by compose; only needed for local dev.       |
-| `REDIS_URL`          | backend      | Token cache + rate-limit store. Degrades gracefully if down.          |
-| `TRUST_PROXY`        | backend      | Set only behind a trusted reverse proxy (real client IP). See below.  |
-| `SECRETS_API_URL`    | CLI          | Defaults to `http://localhost:3000`.                                  |
-| `SECRETS_TOKEN`      | CLI          | Overrides the saved login token (handy in CI).                        |
+| Variable             | Where   | Notes                                                                 |
+| -------------------- | ------- | --------------------------------------------------------------------- |
+| `MASTER_KEYS`        | backend | `version:hex` entries, each 32 bytes hex. **Change the dev default.** |
+| `ACTIVE_KEY_VERSION` | backend | Which key version new secrets are wrapped with.                       |
+| `DATABASE_URL`       | backend | Postgres connection. Set by compose; only needed for local dev.       |
+| `REDIS_URL`          | backend | Token cache + rate-limit store. Degrades gracefully if down.          |
+| `TRUST_PROXY`        | backend | Set only behind a trusted reverse proxy (real client IP). See below.  |
+| `SECRETS_API_URL`    | CLI     | Defaults to `http://localhost:3000`.                                  |
+| `SECRETS_TOKEN`      | CLI     | Overrides the saved login token (handy in CI).                        |
 
 See `backend/.env.example` for the full list with comments.
 
