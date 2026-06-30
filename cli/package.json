@@ -13,12 +13,16 @@
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test src/*.test.ts"
   },
-  "keywords": ["secrets", "cli", "env"],
+  "keywords": [
+    "secrets",
+    "cli",
+    "env"
+  ],
   "author": "Danylo Ohurtsov",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "commander": "^15.0.0"
+    "commander": "^14.0.3"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
