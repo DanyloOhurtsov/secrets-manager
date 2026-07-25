@@ -40,7 +40,7 @@ By default Compose uses the newest stable images. To pin an exact release, add i
 version without the leading `v` to the root `.env` file:
 
 ```dotenv
-SECRETS_MANAGER_VERSION=0.1.1
+SECRETS_MANAGER_VERSION=0.1.2
 ```
 
 To run unreleased code from the current checkout instead, build it locally:
@@ -340,14 +340,14 @@ docker compose up --build
 
 ## Releases and container images
 
-Pushing a semantic-version tag such as `v0.1.1` runs the `Publish container images`
+Pushing a semantic-version tag such as `v0.1.2` runs the `Publish container images`
 workflow. It publishes Linux `amd64` and `arm64` images to:
 
 - `ghcr.io/danyloohurtsov/secrets-manager-backend`
 - `ghcr.io/danyloohurtsov/secrets-manager-frontend`
 
 Stable tags publish the full version, the major/minor version, and `latest`. For
-example, `v0.1.1` publishes `0.1.1`, `0.1`, and `latest`. Pre-release tags such as
+example, `v0.1.2` publishes `0.1.2`, `0.1`, and `latest`. Pre-release tags such as
 `v0.2.0-alpha.1` do not replace `latest`.
 
 GitHub creates new container packages as private. After the first successful publish,
