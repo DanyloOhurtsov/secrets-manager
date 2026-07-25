@@ -24,10 +24,10 @@ jobs:
         include:
           - name: backend
             context: ./backend
-            image: ghcr.io/jdg-projects/secrets-manager-backend
+            image: ghcr.io/danyloohurtsov/secrets-manager-backend
           - name: frontend
             context: ./frontend
-            image: ghcr.io/jdg-projects/secrets-manager-frontend
+            image: ghcr.io/danyloohurtsov/secrets-manager-frontend
 
     steps:
       - name: Check out the tagged source
