@@ -48,11 +48,60 @@ describe('AppController (e2e)', () => {
     await prisma.auditLog.deleteMany();
   });
 
-  it('/ (GET)', () => {
-    return request(app.getHttpServer())
+  it('/ (GET) renders the public API landing page', async () => {
+    const response = await request(app.getHttpServer())
       .get('/')
       .expect(200)
-      .expect('Hello World!');
+      .expect('Content-Type', /text\/html/);
+
+    expect(response.text).toContain('<!doctype html>');
+    expect(response.text).toContain('Secrets, delivered');
+    expect(response.text).toContain('href="api.css"');
+    expect(response.text).not.toContain('<script');
+  });
+
+  it('/api.css (GET) serves same-origin landing page styles', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/api.css')
+      .expect(200)
+      .expect('Content-Type', /text\/css/);
+
+    expect(response.text).toContain('.api-panel');
+    expect(response.text).toContain('@media (max-width: 760px)');
+  });
+
+  it('/info (GET) describes the public API as JSON', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/info')
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      name: 'Secrets Manager API',
+      version: expect.any(String),
+      documentation: 'https://github.com/DanyloOhurtsov/secrets-manager#readme',
+      endpoints: {
+        health: 'GET /health',
+        info: 'GET /info',
+        signup: 'POST /signup',
+        login: 'POST /auth/login',
+      },
+    });
+    expect(response.body).not.toHaveProperty('environment');
+    expect(response.body).not.toHaveProperty('config');
+  });
+
+  it('/health (GET) exposes public liveness metadata', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/health')
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      status: 'ok',
+      service: 'secrets-manager-api',
+      version: expect.any(String),
+      timestamp: expect.any(String),
+    });
+    expect(Number.isNaN(Date.parse(response.body.timestamp))).toBe(false);
   });
 
   it('isolates personal workspaces created through signup', async () => {

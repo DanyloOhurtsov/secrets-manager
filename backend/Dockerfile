@@ -4,6 +4,9 @@
 # dependency tree so the Prisma CLI is available at boot to run migrations.
 FROM node:22-slim
 
+ARG APP_VERSION=development
+ENV APP_VERSION=${APP_VERSION}
+
 # OpenSSL + CA certs are required by Prisma's schema/migration engine on slim.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \

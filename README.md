@@ -28,7 +28,9 @@ Registry, then starts Postgres, Redis, the backend (which runs DB migrations on 
 and the frontend. No local application build is required. When it settles you have:
 
 - **UI** → http://localhost:8080
-- **API** → http://localhost:3000 (this is what the CLI talks to)
+- **API landing page** → http://localhost:3000
+- **API health** → http://localhost:3000/health
+- **API metadata (JSON)** → http://localhost:3000/info
 
 > The compose file ships a **dev-only** default encryption key so it boots with zero
 > setup. Before using this for anything real, override `MASTER_KEYS` — see
