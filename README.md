@@ -11,21 +11,21 @@ most of that when self-hosting for yourself.
 
 ---
 
-## Quickstart (≈15 minutes, one command to boot)
+## Quickstart (≈5 minutes, one command to boot)
 
 You need **Docker** + **Docker Compose**, and **Node 20+** (only for the CLI step).
 
 ### 1. Bring up the whole stack
 
 ```bash
-git clone <this-repo> secrets-manager
+git clone https://github.com/JDG-Projects/secrets-manager.git
 cd secrets-manager
-docker compose up --build
+docker compose up -d
 ```
 
-That single command starts Postgres, Redis, the backend (it runs DB migrations on
-boot), and the frontend. The first build takes a few minutes; after that it's seconds.
-When it settles you have:
+That command pulls the prebuilt backend and frontend images from GitHub Container
+Registry, then starts Postgres, Redis, the backend (which runs DB migrations on boot),
+and the frontend. No local application build is required. When it settles you have:
 
 - **UI** → http://localhost:8080
 - **API** → http://localhost:3000 (this is what the CLI talks to)
@@ -33,6 +33,19 @@ When it settles you have:
 > The compose file ships a **dev-only** default encryption key so it boots with zero
 > setup. Before using this for anything real, override `MASTER_KEYS` — see
 > [Configuration](#configuration).
+
+By default Compose uses the newest stable images. To pin an exact release, add its
+version without the leading `v` to the root `.env` file:
+
+```dotenv
+SECRETS_MANAGER_VERSION=0.1.0
+```
+
+To run unreleased code from the current checkout instead, build it locally:
+
+```bash
+docker compose up --build
+```
 
 ### 2. Sign up and create a place for your secrets
 
@@ -272,15 +285,16 @@ MASTER_KEYS=v1:<64 hex chars>
 ACTIVE_KEY_VERSION=v1
 ```
 
-| Variable             | Where   | Notes                                                                 |
-| -------------------- | ------- | --------------------------------------------------------------------- |
-| `MASTER_KEYS`        | backend | `version:hex` entries, each 32 bytes hex. **Change the dev default.** |
-| `ACTIVE_KEY_VERSION` | backend | Which key version new secrets are wrapped with.                       |
-| `DATABASE_URL`       | backend | Postgres connection. Set by compose; only needed for local dev.       |
-| `REDIS_URL`          | backend | Token cache + rate-limit store. Degrades gracefully if down.          |
-| `TRUST_PROXY`        | backend | Set only behind a trusted reverse proxy (real client IP). See below.  |
-| `SECRETS_API_URL`    | CLI     | Defaults to `http://localhost:3000`.                                  |
-| `SECRETS_TOKEN`      | CLI     | Overrides the saved login token (handy in CI).                        |
+| Variable                  | Where   | Notes                                                                 |
+| ------------------------- | ------- | --------------------------------------------------------------------- |
+| `SECRETS_MANAGER_VERSION` | compose | Container tag to run; defaults to `latest`.                           |
+| `MASTER_KEYS`             | backend | `version:hex` entries, each 32 bytes hex. **Change the dev default.** |
+| `ACTIVE_KEY_VERSION`      | backend | Which key version new secrets are wrapped with.                       |
+| `DATABASE_URL`            | backend | Postgres connection. Set by compose; only needed for local dev.       |
+| `REDIS_URL`               | backend | Token cache + rate-limit store. Degrades gracefully if down.          |
+| `TRUST_PROXY`             | backend | Set only behind a trusted reverse proxy (real client IP). See below.  |
+| `SECRETS_API_URL`         | CLI     | Defaults to `http://localhost:3000`.                                  |
+| `SECRETS_TOKEN`           | CLI     | Overrides the saved login token (handy in CI).                        |
 
 See `backend/.env.example` for the full list with comments.
 
@@ -314,6 +328,29 @@ cd ../frontend
 npm install
 npm run dev                            # UI on :5173, proxies /api -> :3000
 ```
+
+To build and run the full stack from the current checkout instead of pulling its
+published images:
+
+```bash
+docker compose up --build
+```
+
+## Releases and container images
+
+Pushing a semantic-version tag such as `v0.1.0` runs the `Publish container images`
+workflow. It publishes Linux `amd64` and `arm64` images to:
+
+- `ghcr.io/jdg-projects/secrets-manager-backend`
+- `ghcr.io/jdg-projects/secrets-manager-frontend`
+
+Stable tags publish the full version, the major/minor version, and `latest`. For
+example, `v0.1.0` publishes `0.1.0`, `0.1`, and `latest`. Pre-release tags such as
+`v0.2.0-alpha.1` do not replace `latest`.
+
+GitHub creates new container packages as private. After the first successful publish,
+an organization owner must open each package's settings and change its visibility to
+**Public** so that `docker compose up -d` works without GitHub authentication.
 
 ## Tests
 
