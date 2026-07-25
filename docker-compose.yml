@@ -1,8 +1,12 @@
-# Turnkey local stack: Postgres + Redis + backend (API) + frontend (UI).
+# Turnkey stack: Postgres + Redis + backend (API) + frontend (UI).
 #
-# One command brings up everything:
+# The default command pulls the prebuilt backend and frontend images from GHCR:
 #
-#   docker compose up --build
+#   docker compose up -d
+#
+# To pin a release, set SECRETS_MANAGER_VERSION (without the leading "v") in
+# .env, for example SECRETS_MANAGER_VERSION=0.1.0. To build the current checkout
+# instead, use `docker compose up --build`.
 #
 #   UI  -> http://localhost:8080
 #   API -> http://localhost:3000   (this is what the `secrets` CLI talks to)
@@ -48,6 +52,7 @@ services:
       retries: 10
 
   backend:
+    image: ghcr.io/jdg-projects/secrets-manager-backend:${SECRETS_MANAGER_VERSION:-latest}
     build: ./backend
     container_name: secrets_backend
     depends_on:
@@ -75,6 +80,7 @@ services:
       retries: 20
 
   frontend:
+    image: ghcr.io/jdg-projects/secrets-manager-frontend:${SECRETS_MANAGER_VERSION:-latest}
     build: ./frontend
     container_name: secrets_frontend
     depends_on:
