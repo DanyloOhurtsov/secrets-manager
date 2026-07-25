@@ -18,7 +18,7 @@ You need **Docker** + **Docker Compose**, and **Node 20+** (only for the CLI ste
 ### 1. Bring up the whole stack
 
 ```bash
-git clone https://github.com/JDG-Projects/secrets-manager.git
+git clone https://github.com/DanyloOhurtsov/secrets-manager.git
 cd secrets-manager
 docker compose up -d
 ```
@@ -38,7 +38,7 @@ By default Compose uses the newest stable images. To pin an exact release, add i
 version without the leading `v` to the root `.env` file:
 
 ```dotenv
-SECRETS_MANAGER_VERSION=0.1.0
+SECRETS_MANAGER_VERSION=0.1.1
 ```
 
 To run unreleased code from the current checkout instead, build it locally:
@@ -338,14 +338,14 @@ docker compose up --build
 
 ## Releases and container images
 
-Pushing a semantic-version tag such as `v0.1.0` runs the `Publish container images`
+Pushing a semantic-version tag such as `v0.1.1` runs the `Publish container images`
 workflow. It publishes Linux `amd64` and `arm64` images to:
 
-- `ghcr.io/jdg-projects/secrets-manager-backend`
-- `ghcr.io/jdg-projects/secrets-manager-frontend`
+- `ghcr.io/danyloohurtsov/secrets-manager-backend`
+- `ghcr.io/danyloohurtsov/secrets-manager-frontend`
 
 Stable tags publish the full version, the major/minor version, and `latest`. For
-example, `v0.1.0` publishes `0.1.0`, `0.1`, and `latest`. Pre-release tags such as
+example, `v0.1.1` publishes `0.1.1`, `0.1`, and `latest`. Pre-release tags such as
 `v0.2.0-alpha.1` do not replace `latest`.
 
 GitHub creates new container packages as private. After the first successful publish,
