@@ -1,0 +1,167 @@
+# First-superadmin bootstrap as a one-shot Job.
+#
+# WHY THIS IS A JOB AND NOT `kubectl exec`.
+#
+# This used to be:
+#     kubectl exec deployment/api -- npx ts-node src/bootstrap.ts
+#
+# which looks harmless and is not. `kubectl exec` runs the command INSIDE an
+# existing container, so it shares that container's cgroup — and therefore its
+# memory limit. `npx ts-node` starts a second Node process and compiles
+# TypeScript in memory, on top of a NestJS app that is already using most of the
+# 512Mi limit in 40-api.yaml. The kernel OOM-killer resolves that the only way it
+# can: it kills the biggest process in the cgroup, which is the API.
+#
+# Observed: api pods terminated with reason OOMKilled, exit code 137, mid-request.
+# An administrative task took down the thing serving traffic.
+#
+# A Job is the correct shape for anything one-shot: its own pod, its own limits,
+# its own lifecycle, and a log you can read afterwards. Nothing it does can
+# starve a serving pod. The same reasoning already produced 30-migrate-job.yaml.
+#
+# THE TOKEN. The generated `sm_…` token is printed to stdout exactly once and is
+# never recoverable afterwards (only its SHA-256 hash is stored). So the pod log
+# IS the delivery mechanism:
+#
+#     kubectl -n secrets-manager logs job/bootstrap
+#
+# `make bootstrap` prints it for you and then deletes the Job, which removes the
+# token from cluster state. Copy it when it appears.
+#
+# IDEMPOTENT. src/bootstrap.ts exits cleanly if a superadmin already exists, so
+# re-running prints "BOOTSTRAP SKIPPED" rather than minting a second admin.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: bootstrap
+    app.kubernetes.io/component: admin-task
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # Two attempts. Unlike migrations there is nothing to wait out here — if it
+  # fails twice the cause is configuration, and more retries only delay the log.
+  backoffLimit: 2
+
+  # Wall-clock ceiling, so a Job wedged against an unreachable database cannot
+  # retry indefinitely with growing backoff.
+  activeDeadlineSeconds: 300
+
+  # No ttlSecondsAfterFinished, for the same reason as 30-migrate-job.yaml and
+  # one stronger: the token only exists in this pod's log. Letting Kubernetes
+  # garbage-collect the Job on a timer could delete the token before you read it.
+  # `make bootstrap` deletes it explicitly, after printing.
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootstrap
+        app.kubernetes.io/component: admin-task
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      restartPolicy: OnFailure
+
+      initContainers:
+        # Note this waits for the SCHEMA, not merely for Postgres to accept
+        # connections — the same check 40-api.yaml uses, and a stricter gate than
+        # the `pg_isready` in 30-migrate-job.yaml. Bootstrap writes rows to
+        # Identity and Token, so those tables have to exist first. Running this
+        # before the migration Job would otherwise fail on a missing relation.
+        - name: wait-for-migrations
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "waiting for postgres + applied migrations ..."
+              until psql "$DATABASE_URL" -tAc \
+                "select to_regclass('public._prisma_migrations') is not null" \
+                2>/dev/null | grep -qx t; do
+                sleep 2
+              done
+              echo "schema is present"
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_PORT }
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+
+      containers:
+        - name: bootstrap
+          image: secrets-manager-backend:dev
+          imagePullPolicy: IfNotPresent
+
+          # COMPILED OUTPUT, never ts-node. The image already contains this file;
+          # the old exec form paid to recompile it at runtime for no reason.
+          #
+          # The path is dist/src/bootstrap, not dist/bootstrap: prisma.config.ts
+          # sits at the project root and is not excluded from tsconfig.build.json,
+          # so tsc infers the common source root as backend/ and preserves the
+          # src/ segment. Same reason 40-api.yaml runs `node dist/src/main`.
+          command: ["node", "dist/src/bootstrap"]
+
+          env:
+            # Same $(VAR) assembly as 30-migrate-job.yaml — the parts must be
+            # defined earlier in this list than the URL that references them.
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_PORT }
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+
+            # Deliberately NO MASTER_KEYS. bootstrap.ts talks to Prisma directly
+            # and never touches CryptoService, so the master key has no business
+            # being in this pod's environment. Least privilege is cheap here.
+            #
+            # Also no HOME: that variable exists in the other manifests because
+            # `npx` wants a writable home directory. This Job invokes `node`
+            # directly, so there is no npm involved and nothing to configure.
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000 # the `node` user baked into node:22-slim
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is left off to match the other workloads.
+            # This Job is actually the one that could afford it — dropping ts-node
+            # removed the writable-HOME requirement — but Prisma's engine wants a
+            # writable /tmp, so it would need an emptyDir mount to be honest.
+
+          resources:
+            # A fraction of the API's budget: this process opens a connection,
+            # runs two queries and prints. It does not need 512Mi, and giving it
+            # its own smaller box is the entire point of the change.
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }

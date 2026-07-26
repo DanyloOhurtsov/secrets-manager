@@ -1,3 +1,18 @@
 node_modules
-.env
 dist
+
+# Environment files. `.env*` is deliberately broad — the leak this repo had to
+# recover from was a real key in a file that looked like an example. Only
+# *.example is allowed through. See SECURITY.md.
+.env*
+!.env.example
+!*.env.example
+
+# Key material of any kind
+*.key
+*.pem
+
+# Rendered Kubernetes Secrets. `02-secret.yaml` is generated from its .example;
+# the glob covers any future NN-secret.yaml too.
+deploy/k8s/*-secret.yaml
+!deploy/k8s/*-secret.yaml.example

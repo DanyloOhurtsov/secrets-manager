@@ -1,0 +1,191 @@
+# Postgres: headless Service + StatefulSet (which generates its own PVC).
+#
+# Why a StatefulSet and not a Deployment? A Deployment treats its pods as
+# interchangeable cattle: rolling updates start a new pod before killing the old
+# one, and every pod shares one volume claim. For a database that is wrong on
+# both counts — two postgres processes writing the same data directory will
+# corrupt it. A StatefulSet gives ordered, one-at-a-time pod management, a stable
+# pod name (postgres-0, not postgres-7d9f4b-x2k9m), and — the key part — a
+# volumeClaimTemplate that mints one PersistentVolumeClaim *per pod*.
+
+---
+# The governing (headless) Service. `clusterIP: None` means "do not allocate a
+# virtual IP and do not load-balance". DNS for `postgres` then returns the pod
+# IPs directly instead of a proxy IP.
+#
+# A StatefulSet REQUIRES this to exist — `serviceName` below points at it — and
+# it is what creates the per-pod DNS name postgres-0.postgres.secrets-manager.svc.
+# With one replica the practical difference from a normal ClusterIP is nil, but
+# the moment you add replicas you need to address individual members by name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  clusterIP: None
+  # No `type:` field => ClusterIP, i.e. reachable only from inside the cluster.
+  # The database is deliberately NOT exposed to your host. Use
+  # `kubectl port-forward -n secrets-manager svc/postgres 5433:5432` when you
+  # want psql.
+  selector:
+    # This is the whole of Kubernetes service discovery: a Service finds its
+    # pods by matching labels. These keys must match the pod template labels in
+    # the StatefulSet below, or you get a Service with zero endpoints and
+    # "connection refused" with no other clue.
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432       # the port the Service listens on
+      targetPort: 5432 # the port on the pod it forwards to
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # Must name the headless Service above.
+  serviceName: postgres
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+
+  template:
+    metadata:
+      labels:
+        # Must satisfy BOTH the Service selector and the StatefulSet's own
+        # `selector.matchLabels` above.
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      # How long Kubernetes waits after SIGTERM before SIGKILL. Postgres needs
+      # this to finish its shutdown checkpoint; the 30s default is tight enough
+      # to risk recovery-on-next-boot, so we widen it.
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            # Purely informational — it does not open or firewall anything.
+            # Its value is documentation plus letting a Service reference the
+            # port by name.
+            - name: postgres
+              containerPort: 5432
+
+          env:
+            # POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD are read by the
+            # official image's entrypoint on FIRST boot only, to initialise the
+            # data directory. Changing them later does nothing to an existing
+            # volume — you must delete the PVC to re-init.
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                # Same shape as configMapKeyRef, different source. This is a
+                # reference, not a copy: the value is resolved by kubelet at pod
+                # start and never appears in the pod spec.
+                secretKeyRef:
+                  name: app-secrets
+                  key: POSTGRES_PASSWORD
+
+            # PGDATA points one level BELOW the mount point. This is the
+            # standard workaround for the fact that many storage backends create
+            # a lost+found directory at the root of a fresh volume, which makes
+            # postgres refuse to initdb into a "non-empty" directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          volumeMounts:
+            - name: data                       # matches the claim template name
+              mountPath: /var/lib/postgresql/data
+
+          # readinessProbe controls Service membership: fail it and this pod is
+          # removed from the `postgres` Service endpoints, so nothing routes to
+          # a database that cannot answer.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                # $POSTGRES_USER/$POSTGRES_DB are expanded by the shell here,
+                # not by Kubernetes — this runs inside the container.
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          # livenessProbe controls restarts: fail it and kubelet kills the
+          # container. Deliberately slacker than readiness — a slow database
+          # should be pulled from routing, not killed mid-query.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            # `requests` is what the scheduler reserves — it decides whether the
+            # pod fits on a node. `limits` is what the kernel enforces at
+            # runtime: exceeding the CPU limit gets you throttled, exceeding the
+            # memory limit gets you OOMKilled (exit code 137).
+            requests:
+              cpu: 100m       # 100 millicores = 0.1 of one core
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+  # volumeClaimTemplates is the StatefulSet-only field that makes storage
+  # durable. For each pod it creates a PersistentVolumeClaim named
+  # <template>-<statefulset>-<ordinal>, i.e. `data-postgres-0`.
+  #
+  # A PVC is a *request* for storage; kind ships the rancher local-path
+  # provisioner as the default StorageClass, which answers it by creating a
+  # hostPath directory on the node. So your data survives pod restarts and
+  # rescheduling — but NOT `kind delete cluster`, which destroys the node
+  # container and everything on it.
+  #
+  # Deliberate sharp edge: deleting a StatefulSet does NOT delete its PVCs.
+  # That is a data-safety default. `make undeploy` deletes the namespace, which
+  # DOES take the PVCs with it.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce = mountable read-write by a single node. Correct for a
+        # database; the alternatives (ReadWriteMany) exist for shared filesystems.
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

@@ -1,0 +1,159 @@
+# The React SPA served by nginx: Deployment + Service.
+#
+# This is the only thing you actually open in a browser. nginx does two jobs
+# (both defined in frontend/nginx.conf, baked into the image at build time):
+#   1. serve the built Vite assets, falling back to index.html so client-side
+#      routes work — the app has no router library, just history.pushState;
+#   2. reverse-proxy /api/ to http://backend:3000/, with the trailing slash
+#      stripping the /api prefix.
+#
+# Job 2 is why everything stays same-origin: the browser only ever talks to
+# localhost:8081, so the narrow CSP in backend/src/security.ts
+# (connect-src 'self') holds and no CORS configuration is needed anywhere.
+#
+# It is also the coupling flagged at the top of 40-api.yaml: `backend` is a
+# hostname compiled into this image, so the API Service must carry that exact
+# name in this exact namespace.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: dashboard
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # Paired with the extraPortMapping in kind-config.yaml:
+      #   localhost:8081 -> node:30080 -> Service dashboard -> pod:8080
+      #
+      # Three different numbers, three different scopes: 8081 is the HOST port
+      # (8080 is taken by a docker compose stack), 30080 is the NodePort, and
+      # 8080 is the containerPort that nginx-unprivileged listens on. `port: 80`
+      # below is the Service's own cluster-internal port and is unrelated to any
+      # of them — targetPort resolves by NAME, so it lands on containerPort 8080.
+      nodePort: 30080
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: dashboard
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # Static assets with zero server-side state — trivially horizontally scalable.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dashboard
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dashboard
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      containers:
+        - name: nginx
+          image: secrets-manager-frontend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # No env at all. The SPA is compiled to static files, so it has no
+          # runtime configuration to inject — api.ts hardcodes the relative path
+          # /api and reads its bearer token from localStorage.
+          #
+          # This is the usual SPA/Kubernetes friction: anything you would want to
+          # configure per-environment (an API base URL, a feature flag) was fixed
+          # at `npm run build` time and cannot be changed with a ConfigMap. The
+          # standard escapes are an entrypoint that rewrites a placeholder in the
+          # built JS, or fetching a /config.json at boot. This app sidesteps it
+          # entirely by being same-origin, which is the better answer.
+
+          # nginx has no dedicated health endpoint here, so we probe / — it
+          # returns index.html from disk. Cheap and sufficient: if nginx can
+          # serve that, it can serve the app.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          # Note these probes hit nginx only and never reach the API, so a
+          # dashboard pod reports Ready even when the backend is down. That is
+          # correct — the UI still loads and surfaces the API error itself — but
+          # it means "all pods Ready" is not the same as "the stack works".
+
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+            # WHAT ACTUALLY WENT WRONG HERE, because the original explanation
+            # was wrong and cost real time.
+            #
+            # The story used to be "no runAsNonRoot because nginx must be root
+            # to bind port 80". That is true of the stock nginx image but it was
+            # never the failure. The pod crashed with:
+            #
+            #     nginx: [emerg] chown("/var/cache/nginx/client_temp", ...)
+            #     Operation not permitted
+            #
+            # The container WAS running as root. What it did not have was
+            # CAP_CHOWN, because `drop: ["ALL"]` above removes it. Root without
+            # capabilities is not root: nginx chowns its cache directories at
+            # startup, that syscall was denied, and it aborted. Binding a
+            # privileged port never entered into it — the process died before
+            # reaching a listen() call.
+            #
+            # This is worth remembering as a general shape: "runs as root" and
+            # "has the capability it needs" are separate things, and dropping
+            # ALL capabilities breaks root-assuming images in ways whose error
+            # messages do not mention capabilities at all.
+            #
+            # The fix was the base image, not the securityContext:
+            # frontend/Dockerfile now uses nginxinc/nginx-unprivileged, which
+            # runs as uid 101, listens on 8080 (above 1024, so no CAP_NET_BIND
+            # _SERVICE), and ships cache paths already owned by that uid — so
+            # there is nothing to chown and nothing to drop that it needs.
+            #
+            # runAsNonRoot: true is therefore now both correct and enforceable;
+            # it makes the kubelet refuse to start the pod if the image is ever
+            # switched back to one that would run as uid 0.

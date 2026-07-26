@@ -3,7 +3,42 @@
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
-export default defineConfig({
+// ---------------------------------------------------------------------------
+// `export =` IS DELIBERATE. Do not "fix" it to `export default`.
+//
+// This is TypeScript's CommonJS export syntax. It looks like a mistake if you
+// have only ever seen `export default`, so: here is why it has to be this.
+//
+// This file is consumed in two different forms:
+//   - locally, Prisma loads prisma.config.TS directly (it has its own loader);
+//   - in the container, there is no TypeScript at all, so backend/Dockerfile
+//     ships the COMPILED dist/prisma.config.js as /app/prisma.config.js.
+//
+// The compiled form is where `export default` breaks. Because the package is
+// CommonJS (no "type": "module"), tsc lowers `export default X` to the interop
+// shape:
+//
+//     Object.defineProperty(exports, "__esModule", { value: true });
+//     exports.default = X;
+//
+// @prisma/config's loader does not unwrap `.default` from a CJS module, so it
+// sees no valid config object and the migration Job dies with:
+//
+//     Failed to parse syntax of config file at "/app/prisma.config.js"
+//
+// which is a confusing message for what is really a module-shape mismatch.
+// `export =` lowers to a plain `module.exports = X`, which loads in both
+// places. (A hand-written prisma.config.mjs also works, but that means keeping
+// a second copy of this file in sync.)
+//
+// CONSTRAINT THIS IMPOSES: `export =` is illegal in an ES module, so this file
+// blocks moving the backend to ESM ("type": "module" / module: esnext). If that
+// move ever happens, convert this file to `export default` AT THE SAME TIME —
+// under ESM tsc emits a real ESM default export, which the loader does handle.
+// Verify with `npx prisma validate` both on the host and inside the built
+// image; the failure only shows up in the compiled form.
+// ---------------------------------------------------------------------------
+export = defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",

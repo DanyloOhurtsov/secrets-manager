@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#
+# Enable with:  git config core.hooksPath .githooks
+#
+# Catches key material before it leaves the machine. The same scan runs in CI
+# (.github/workflows/ci.yml) as the backstop for anyone who has not enabled
+# hooks, or who commits with --no-verify: a hook is a convenience, never the
+# control. See SECURITY.md.
+#
+set -euo pipefail
+
+exec "$(git rev-parse --show-toplevel)/scripts/secret-scan.sh" --staged

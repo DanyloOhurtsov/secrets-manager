@@ -1,0 +1,58 @@
+# kind (Kubernetes IN Docker) cluster definition.
+#
+#   kind create cluster --config kind-config.yaml
+#
+# kind runs each Kubernetes "node" as a Docker container on your machine. That
+# means the cluster network is isolated from your host in exactly the same way a
+# container network is: nothing inside is reachable from macOS unless you
+# publish a port. `extraPortMappings` is kind's equivalent of `docker run -p`.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+# Cluster name. kind prefixes the Docker container and the kubectl context with
+# it, so you get context "kind-secrets-manager". Keep it in sync with the
+# CLUSTER_NAME variable in the Makefile.
+name: secrets-manager
+
+nodes:
+  # A single node that runs BOTH the control plane (api-server, etcd,
+  # scheduler, controller-manager) and your workloads. Real clusters separate
+  # these; for learning, one node keeps everything visible in one place.
+  #
+  # Note kind auto-removes the control-plane NoSchedule taint when the cluster
+  # has no worker nodes, which is why your pods can land here at all.
+  - role: control-plane
+
+    extraPortMappings:
+      # containerPort = the port ON THE NODE (inside the kind Docker container).
+      # hostPort      = the port on your Mac.
+      #
+      # A Service of `type: NodePort` opens its port on every node, so the chain
+      # is:  localhost:8081 -> node:30080 -> Service dashboard -> pod:8080
+      #
+      # Read that chain carefully — the three numbers are three different
+      # scopes, and only the first one is a host port:
+      #   8081  = hostPort, on your Mac. NOT 8080: a docker compose stack
+      #           already occupies 8080/3000, so the cluster moved up by one.
+      #   30080 = the NodePort. NodePort values MUST fall in 30000-32767
+      #           (Kubernetes' default reserved range), which is why they look
+      #           arbitrary. Unchanged by the host-port move.
+      #   8080  = the containerPort nginx listens on. It used to be 80; the
+      #           frontend image is nginxinc/nginx-unprivileged now, which runs
+      #           as uid 101 and listens above 1024. See 50-dashboard.yaml.
+
+      # Dashboard (nginx serving the SPA + proxying /api -> backend).
+      - containerPort: 30080
+        hostPort: 8081
+        protocol: TCP
+
+      # API, exposed directly so the `secrets` CLI can talk to it without a
+      # port-forward:  SECRETS_API_URL=http://localhost:3001
+      #
+      # 3001 for the same reason as 8081 — compose has 3000. In-cluster the API
+      # is still on 3000 (Service `backend`, containerPort 3000); only the host
+      # side moved.
+      - containerPort: 30000
+        hostPort: 3001
+        protocol: TCP

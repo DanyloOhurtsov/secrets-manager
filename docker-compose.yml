@@ -11,14 +11,15 @@
 #   UI  -> http://localhost:8080
 #   API -> http://localhost:3000   (this is what the `secrets` CLI talks to)
 #
-# The MASTER_KEYS / ACTIVE_KEY_VERSION defaults below are DEV-ONLY so the stack
-# boots with zero manual crypto. For anything real, override them — e.g. create a
-# `.env` next to this file:
+# MASTER_KEYS has NO default and the stack will not start without it — that is
+# deliberate (see SECURITY.md). Generate one and put it in a `.env` next to this
+# file before the first `docker compose up`:
 #
-#   MASTER_KEYS=v1:<64 hex chars>
-#   ACTIVE_KEY_VERSION=v1
+#   echo "MASTER_KEYS=v1:$(openssl rand -hex 32)" >> .env
+#   echo "ACTIVE_KEY_VERSION=v1" >> .env
 #
-# (see backend/.env.example for how to generate a key).
+# ACTIVE_KEY_VERSION does default to v1 — it only names which key to wrap new
+# secrets with, so it is not key material.
 #
 # Doing local backend dev instead? Bring up just the infra:  docker compose up -d db redis
 
@@ -63,8 +64,9 @@ services:
     environment:
       DATABASE_URL: postgresql://dev:dev@db:5432/secrets_manager
       REDIS_URL: redis://redis:6379
-      # DEV-ONLY default master key — override for production (see backend/.env.example).
-      MASTER_KEYS: ${MASTER_KEYS:-v1:ec03de457afe235850ec435f0aaaf9bf32dba3722eca106428c4f088f7403661}
+      # `:?` not `:-` — compose aborts with this message rather than silently
+      # falling back to a shared key. Never give this variable a default.
+      MASTER_KEYS: '${MASTER_KEYS:?required — generate with echo "v1:$(openssl rand -hex 32)"}'
       ACTIVE_KEY_VERSION: ${ACTIVE_KEY_VERSION:-v1}
       PORT: "3000"
     ports:
@@ -87,7 +89,10 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "8080:80"
+      # Container side is 8080, not 80: the image is nginx-unprivileged, which
+      # runs as uid 101 and listens above 1024. Mapping to 80 here publishes a
+      # port nothing is bound to, and the UI just refuses the connection.
+      - "8080:8080"
 
 volumes:
   pgdata:

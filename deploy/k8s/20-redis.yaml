@@ -1,0 +1,134 @@
+# Redis: Deployment + ClusterIP Service.
+#
+# A Deployment here, not a StatefulSet, and that is a design statement rather
+# than a shortcut. In this app Redis holds only two things:
+#   - a 30-second cache of token verifications (TokenService),
+#   - rate-limit counters (RedisThrottlerStorage).
+# Both are derived state that regenerates itself. There is nothing to persist,
+# so there is no volume, so there is no reason to want stable identity or
+# ordered rollout. Losing this pod costs one slow request and a reset rate-limit
+# window.
+#
+# It follows that Redis is NOT a startup dependency: CacheService catches its own
+# errors and returns null, and RedisThrottlerStorage logs a warning and degrades
+# to a per-process in-memory counter. Nothing here needs to gate the API's boot.
+#
+# The one behaviour worth knowing: with api replicas > 1 AND Redis down, each API
+# pod counts rate limits separately, so the effective global limit multiplies by
+# the replica count. Degraded, not broken — but it is a real security property
+# quietly weakening, which is why the fallback logs a warning.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # Default type. Allocates a stable virtual IP inside the cluster and
+  # load-balances across ready pods. The name `redis` matches REDIS_URL in the
+  # ConfigMap (redis://redis:6379). Not reachable from your host.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  # Recreate: kill the old pod before starting the new one. Default is
+  # RollingUpdate, which would briefly run two Redis pods behind one Service and
+  # split the rate-limit counters between them. Momentary downtime is the better
+  # trade for a cache.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: cache
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          imagePullPolicy: IfNotPresent
+          # No persistence: disable RDB snapshots so Redis never tries to write
+          # a dump file to a read-only-ish ephemeral filesystem, and cap memory
+          # with an LRU policy so it can never grow into its own limit and get
+          # OOMKilled. Both keys are cache data — evicting them is harmless.
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - 128mb
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            # readOnlyRootFilesystem (below) makes the entire container
+            # filesystem immutable, so we hand back exactly the one directory
+            # Redis expects to own. emptyDir is a scratch volume tied to the pod
+            # lifetime — created empty, deleted with the pod. That is the correct
+            # storage class for a cache, and it is what distinguishes "this pod
+            # needs a writable path" from "this app needs durable data".
+            - name: redis-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              # Above --maxmemory (128mb) to leave headroom for Redis' own
+              # overhead — the process is bigger than the dataset it holds.
+              cpu: 500m
+              memory: 192Mi
+          securityContext:
+            # Redis needs no elevated anything, so lock it down. This is the
+            # cheapest hardening in Kubernetes and costs nothing here.
+            runAsNonRoot: true
+            runAsUser: 999          # the `redis` user in the official image
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: redis-data
+          emptyDir: {}
