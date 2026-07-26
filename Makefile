@@ -79,6 +79,18 @@ load-images: ## Side-load the built images into the kind cluster's nodes
 # ---------------------------------------------------------------------------
 
 deploy: ## Apply all manifests in dependency order and wait for readiness
+# 02-secret.yaml is gitignored (it holds the master key), so on a fresh clone it
+# does not exist and `kubectl apply` would fail with a bare "no such file".
+# Generating that key is step 1 here, exactly as it is for compose.
+	@test -f $(K8S_DIR)/02-secret.yaml || ( \
+		echo "!!! $(K8S_DIR)/02-secret.yaml is missing (it is gitignored on purpose)."; \
+		echo ""; \
+		echo "    cp $(K8S_DIR)/02-secret.yaml.example $(K8S_DIR)/02-secret.yaml"; \
+		echo "    echo \"v1:\$$(openssl rand -hex 32)\"   # paste as MASTER_KEYS"; \
+		echo ""; \
+		echo "    Never reuse a key from a repository -- see SECURITY.md."; \
+		exit 1 )
+
 	@echo "==> namespace + config"
 	kubectl apply -f $(K8S_DIR)/00-namespace.yaml
 	$(KUBECTL) apply -f $(K8S_DIR)/01-configmap.yaml

@@ -11,15 +11,34 @@ most of that when self-hosting for yourself.
 
 ---
 
-## Quickstart (≈5 minutes, one command to boot)
+## Quickstart (≈5 minutes)
 
 You need **Docker** + **Docker Compose**, and **Node 20+** (only for the CLI step).
 
-### 1. Bring up the whole stack
+### 1. Generate your master encryption key
+
+This is the key that wraps every secret you will store, so it has to be yours and
+it has to exist before anything starts. There is no default — the stack refuses to
+boot without it, on purpose.
 
 ```bash
 git clone https://github.com/DanyloOhurtsov/secrets-manager.git
 cd secrets-manager
+
+echo "MASTER_KEYS=v1:$(openssl rand -hex 32)" >> .env
+echo "ACTIVE_KEY_VERSION=v1" >> .env
+```
+
+`.env` is gitignored. Back this key up somewhere safe: **lose it and every stored
+secret is unrecoverable**, since the values are only ever stored encrypted.
+
+> Never reuse a key you found in a repository, this one included. See
+> [SECURITY.md](SECURITY.md) — a real key was published in this repo's history
+> before 2026-07-26 and must never be used.
+
+### 2. Bring up the whole stack
+
+```bash
 docker compose up -d
 ```
 
@@ -32,9 +51,9 @@ and the frontend. No local application build is required. When it settles you ha
 - **API health** → http://localhost:3000/health
 - **API metadata (JSON)** → http://localhost:3000/info
 
-> The compose file ships a **dev-only** default encryption key so it boots with zero
-> setup. Before using this for anything real, override `MASTER_KEYS` — see
-> [Configuration](#configuration).
+If you skipped step 1, compose stops immediately with
+`required — generate with echo "v1:$(openssl rand -hex 32)"`. That is the guard
+working, not a bug.
 
 By default Compose uses the newest stable images. To pin an exact release, add its
 version without the leading `v` to the root `.env` file:
@@ -49,7 +68,7 @@ To run unreleased code from the current checkout instead, build it locally:
 docker compose up --build
 ```
 
-### 2. Sign up and create a place for your secrets
+### 3. Sign up and create a place for your secrets
 
 1. Open **http://localhost:8080** and **Sign up** with an email + password. A personal
    workspace is created for you automatically.
@@ -60,7 +79,7 @@ docker compose up --build
 > (superadmin tooling), and the _Members/roles_ parts of the **Access** tab. You only
 > need **Projects** — plus the **Access** tab for the CLI/CI step below.
 
-### 3. Import your existing `.env`
+### 4. Import your existing `.env`
 
 In the environment you just created, click **Import .env**, then paste your `.env`
 contents (or upload the file) and **Import**. Existing keys get a new version; new keys
@@ -68,7 +87,7 @@ are created. You can now reveal, edit, roll back, or soft-delete any secret.
 
 That's the migration hook — your real `.env` is now managed here.
 
-### 4. Install the CLI
+### 5. Install the CLI
 
 ```bash
 cd cli
@@ -86,7 +105,7 @@ secrets --version
 On Windows, `npm link` creates both PowerShell (`secrets.ps1`) and Command Prompt
 (`secrets.cmd`) shims. The current CLI supports either one.
 
-### 5. Create a service account token
+### 6. Create a service account token
 
 Secret **values** are only readable through an explicit grant — even for you. To let a
 local process or CI job read them, create a service account and grant it access:
@@ -110,7 +129,7 @@ The token is a credential: do not commit it, paste it into logs, or expose it to
 browser code. For CI, use `SECRETS_TOKEN` instead of `secrets login`; see
 [CI and deployment](#ci-and-deployment).
 
-### 6. Run your app with secrets injected
+### 7. Run your app with secrets injected
 
 `secrets run` starts another process and adds the selected environment's secrets to
 that process. Your application keeps reading configuration normally:
@@ -123,7 +142,7 @@ The CLI does not create a `.env` file. Secrets exist only in the started process
 its child processes. Values from Secrets Manager override existing variables with the
 same names.
 
-#### 6.1 Find the environment ID
+#### 7.1 Find the environment ID
 
 Use the service account token to list only the projects and environments it can
 access.
@@ -156,7 +175,7 @@ Invoke-RestMethod "$api/projects" -Headers @{
 
 Copy the required value from `environments[].id`. Do not use the project `id`.
 
-#### 6.2 Start the application from its own directory
+#### 7.2 Start the application from its own directory
 
 Change to the application directory — not the Secrets Manager `cli` directory — and
 wrap its normal start command:
@@ -228,7 +247,7 @@ you update:
 secrets.cmd run -e <environmentId> -- npm.cmd start
 ```
 
-### 7. CI and deployment
+### 8. CI and deployment
 
 Do not run `secrets login` in CI. Store these as protected variables in the CI
 platform:
@@ -274,12 +293,13 @@ Done — you went from clone to a running app with injected secrets.
 
 ## Configuration
 
-The compose file works out of the box with dev defaults. To override, create a `.env`
-next to `docker-compose.yml`:
+Configuration lives in a `.env` next to `docker-compose.yml`. `MASTER_KEYS` is the
+only required value and has **no default** — the stack refuses to start without one
+(step 1 of the quickstart):
 
 ```bash
 # Generate a real master key:
-node -e "console.log('v1:' + require('crypto').randomBytes(32).toString('hex'))"
+echo "v1:$(openssl rand -hex 32)"
 ```
 
 ```dotenv
@@ -287,11 +307,11 @@ MASTER_KEYS=v1:<64 hex chars>
 ACTIVE_KEY_VERSION=v1
 ```
 
-| Variable                  | Where   | Notes                                                                 |
-| ------------------------- | ------- | --------------------------------------------------------------------- |
-| `SECRETS_MANAGER_VERSION` | compose | Container tag to run; defaults to `latest`.                           |
-| `MASTER_KEYS`             | backend | `version:hex` entries, each 32 bytes hex. **Change the dev default.** |
-| `ACTIVE_KEY_VERSION`      | backend | Which key version new secrets are wrapped with.                       |
+| Variable                  | Where   | Notes                                                                    |
+| ------------------------- | ------- | ------------------------------------------------------------------------ |
+| `SECRETS_MANAGER_VERSION` | compose | Container tag to run; defaults to `latest`.                              |
+| `MASTER_KEYS`             | backend | `version:hex` entries, each 64 hex chars. **Required, no default.**      |
+| `ACTIVE_KEY_VERSION`      | backend | Which key version new secrets are wrapped with. Defaults to `v1`.        |
 | `DATABASE_URL`            | backend | Postgres connection. Set by compose; only needed for local dev.       |
 | `REDIS_URL`               | backend | Token cache + rate-limit store. Degrades gracefully if down.          |
 | `TRUST_PROXY`             | backend | Set only behind a trusted reverse proxy (real client IP). See below.  |
@@ -300,8 +320,11 @@ ACTIVE_KEY_VERSION=v1
 
 See `backend/.env.example` for the full list with comments.
 
-**Production notes:** override `MASTER_KEYS` with your own key; put the stack behind
-HTTPS; set `TRUST_PROXY` to the number of proxy hops if you run behind an ingress.
+**Production notes:** use a `MASTER_KEYS` value you generated yourself and have never
+published — see [SECURITY.md](SECURITY.md) for the key that was leaked in this repo's
+history and the rotation path; put the stack behind HTTPS; set `TRUST_PROXY` to the
+number of proxy hops if you run behind an ingress. The `dev:dev` Postgres credentials
+in `docker-compose.yml` are local-development values, not production ones.
 
 ---
 
@@ -315,13 +338,24 @@ Three independent npm packages (no root workspace):
 
 ## Local development (without Docker)
 
-Bring up just the infra, then run each package in watch mode:
+**First, enable the git hooks — one line, do it once per clone:**
+
+```bash
+git config core.hooksPath .githooks
+```
+
+That installs a `pre-commit` hook which blocks a commit containing master key
+material, so a key never leaves your machine. It runs `scripts/secret-scan.sh`,
+the same scan CI runs — CI is the backstop for anyone who skips this or commits
+with `--no-verify`. See [SECURITY.md](SECURITY.md) for why this exists.
+
+Then bring up just the infra and run each package in watch mode:
 
 ```bash
 docker compose up -d db redis          # Postgres on :5433, Redis on :6379
 
 cd backend
-cp .env.example .env                   # then edit MASTER_KEYS if you like
+cp .env.example .env                   # then generate MASTER_KEYS (it ships empty)
 npm install
 npx prisma migrate dev
 npm run start:dev                      # API on :3000

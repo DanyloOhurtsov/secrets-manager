@@ -24,6 +24,24 @@ env:
   CI: "true"
 
 jobs:
+  secret-scan:
+    name: Secret scan (no key material in tracked files)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Fail on 64-hex literals in tracked files
+        # Той самий скрипт, що і в .githooks/pre-commit — одна реалізація, два
+        # виклики. Хук працює по staged-файлах і його можна обійти (--no-verify
+        # або просто не увімкнений core.hooksPath), тому CI сканує весь індекс:
+        # хук — це зручність, а контроль — тут.
+        run: |
+          ./scripts/secret-scan.sh \
+            || { echo "::error::Key material found in a tracked file. Remove it and rotate the key (SECURITY.md)."; exit 1; }
+
   backend:
     name: Backend (unit + build)
     runs-on: ubuntu-latest
