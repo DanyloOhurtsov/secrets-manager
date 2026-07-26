@@ -64,7 +64,7 @@ services:
       DATABASE_URL: postgresql://dev:dev@db:5432/secrets_manager
       REDIS_URL: redis://redis:6379
       # DEV-ONLY default master key — override for production (see backend/.env.example).
-      MASTER_KEYS: ${MASTER_KEYS:-v1:ec03de457afe235850ec435f0aaaf9bf32dba3722eca106428c4f088f7403661}
+      MASTER_KEYS: '${MASTER_KEYS:?required — generate with echo "v1:$(openssl rand -hex 32)"}'
       ACTIVE_KEY_VERSION: ${ACTIVE_KEY_VERSION:-v1}
       PORT: "3000"
     ports:

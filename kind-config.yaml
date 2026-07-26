@@ -36,11 +36,11 @@ nodes:
 
       # Dashboard (nginx serving the SPA + proxying /api -> backend).
       - containerPort: 30080
-        hostPort: 8080
+        hostPort: 8081
         protocol: TCP
 
       # API, exposed directly so the `secrets` CLI can talk to it without a
       # port-forward:  SECRETS_API_URL=http://localhost:3000
       - containerPort: 30000
-        hostPort: 3000
+        hostPort: 3001
         protocol: TCP
