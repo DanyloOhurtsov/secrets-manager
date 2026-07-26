@@ -89,7 +89,10 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "8080:80"
+      # Container side is 8080, not 80: the image is nginx-unprivileged, which
+      # runs as uid 101 and listens above 1024. Mapping to 80 here publishes a
+      # port nothing is bound to, and the UI just refuses the connection.
+      - "8080:8080"
 
 volumes:
   pgdata:

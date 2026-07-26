@@ -59,8 +59,15 @@ By default Compose uses the newest stable images. To pin an exact release, add i
 version without the leading `v` to the root `.env` file:
 
 ```dotenv
-SECRETS_MANAGER_VERSION=0.1.2
+SECRETS_MANAGER_VERSION=0.2.0
 ```
+
+> **This compose file requires `0.2.0` or newer.** In `0.2.0` the frontend
+> container's listen port moved from 80 to 8080, and `docker-compose.yml` maps
+> `8080:8080` to match. Pinning an older image with this file publishes a port
+> nothing is bound to and the dashboard is simply unreachable. Compose cannot
+> enforce a minimum, so to run `0.1.x` check out that tag and use its compose
+> file: `git checkout v0.1.2`. See [Breaking changes](#breaking-changes-in-020).
 
 To run unreleased code from the current checkout instead, build it locally:
 
@@ -127,7 +134,7 @@ secrets login --token sm_xxxxxxxx     # API defaults to http://localhost:3000
 
 The token is a credential: do not commit it, paste it into logs, or expose it to
 browser code. For CI, use `SECRETS_TOKEN` instead of `secrets login`; see
-[CI and deployment](#ci-and-deployment).
+[CI and deployment](#8-ci-and-deployment).
 
 ### 7. Run your app with secrets injected
 
@@ -372,17 +379,72 @@ published images:
 docker compose up --build
 ```
 
+## Breaking changes in 0.2.0
+
+### Read this first if you ever ran 0.1.x
+
+`0.1.x` shipped a **real, working master key** as the example value in
+`backend/.env.example`, and for part of that period `docker-compose.yml` used the
+same key as a silent shell default. If you followed the quickstart without
+setting `MASTER_KEYS` yourself, **every secret you stored is encrypted under a key
+that is published in this repository and readable by anyone who clones it.**
+
+**Upgrading does not fix this.** One of the changes below is "`MASTER_KEYS` is now
+required" — it is easy to read that, generate a fresh key, and conclude you are
+done. You are not. A new key protects only what you write *afterwards*. It does
+not re-encrypt what is already in the database, and it does nothing about backups
+or dumps taken while the leaked key was active: whoever holds one can still
+decrypt it, because both the ciphertext and its wrapped data key are unchanged.
+
+If this describes you, the recovery path in **[SECURITY.md](SECURITY.md) is
+required, not optional** — and it ends with rotating the underlying credentials
+(database passwords, API keys, tokens), because those are what was actually
+disclosed. Rotating only the master key leaves them exposed.
+
+Check whether you are affected — the leaked key begins `ec03de45`:
+
+```bash
+grep -r 'ec03de45' .env backend/.env deploy/k8s/02-secret.yaml 2>/dev/null
+docker compose exec backend printenv MASTER_KEYS | cut -c1-12
+```
+
+### Everything else that breaks
+
+| Change | Symptom if you do nothing | Fix |
+| --- | --- | --- |
+| **`MASTER_KEYS` has no default.** The compose file uses `${MASTER_KEYS:?…}` instead of a committed fallback. | `docker compose up` aborts immediately with `required — generate with echo "v1:$(openssl rand -hex 32)"`. | Generate a key into `.env` — step 1 of the [Quickstart](#1-generate-your-master-encryption-key). |
+| **Stricter key validation.** Malformed `MASTER_KEYS` values that used to be silently accepted (non-hex characters, trailing junk after 64 valid chars, a version listed twice) now fail at startup. | The API refuses to start, naming the offending entry. | Correct the value. A key is exactly 64 hex characters. |
+| **Frontend container port 80 → 8080.** The image is `nginxinc/nginx-unprivileged`, running as uid 101. | The dashboard is unreachable if anything still targets container port 80 — your own reverse proxy, a compose override, or an old pinned image with the new compose file. | Target 8080. This repo's `docker-compose.yml` maps `8080:8080`. |
+| **The backend image no longer contains build tooling.** It is multi-stage and production-only: no `.ts` sources, no `typescript`, no `ts-node`. | Anything that shelled into the container to run TypeScript directly fails with "not found". | Run the compiled output (`node dist/src/…`). The Prisma CLI is still present for migrations. |
+
+### Not a breaking change, but new: local Kubernetes
+
+`deploy/k8s/` plus `kind-config.yaml` and the `Makefile` bring up the stack on a
+local [kind](https://kind.sigs.k8s.io/) cluster. It is **not part of a release**:
+those manifests reference locally built `:dev` images (`make build-images`), not
+the published GHCR tags, so they track the source tree rather than
+`SECRETS_MANAGER_VERSION`. It also uses host ports **8081/3001**, precisely so it
+can run alongside the compose stack on 8080/3000. See
+[deploy/k8s/README.md](deploy/k8s/README.md).
+
 ## Releases and container images
 
-Pushing a semantic-version tag such as `v0.1.2` runs the `Publish container images`
+Pushing a semantic-version tag such as `v0.2.0` runs the `Publish container images`
 workflow. It publishes Linux `amd64` and `arm64` images to:
 
 - `ghcr.io/danyloohurtsov/secrets-manager-backend`
 - `ghcr.io/danyloohurtsov/secrets-manager-frontend`
 
 Stable tags publish the full version, the major/minor version, and `latest`. For
-example, `v0.1.2` publishes `0.1.2`, `0.1`, and `latest`. Pre-release tags such as
-`v0.2.0-alpha.1` do not replace `latest`.
+example, `v0.2.0` publishes `0.2.0`, `0.2`, and `latest`. Pre-release tags such as
+`v0.2.1-alpha.1` do not replace `latest`.
+
+**Tagging is the only thing that publishes.** The workflow triggers on
+`push: tags: v*` — merging to `main` publishes nothing, and `latest` keeps
+pointing at the previously tagged build. That matters whenever a change to
+`docker-compose.yml` depends on a change inside an image: until the tag is
+pushed, a fresh clone pulls the old image and gets the new compose file. Ship
+both in the same tag.
 
 GitHub creates new container packages as private. After the first successful publish,
 an organization owner must open each package's settings and change its visibility to

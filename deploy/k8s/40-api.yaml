@@ -33,7 +33,11 @@ spec:
   # `secrets` CLI on the host (via the node port).
   #
   # The chain to your Mac, completed by extraPortMappings in kind-config.yaml:
-  #   localhost:3000 -> kind node:30000 -> Service backend -> a ready pod:3000
+  #   localhost:3001 -> kind node:30000 -> Service backend -> a ready pod:3000
+  #
+  # Host side is 3001 because a docker compose stack occupies 3000. The
+  # in-cluster port is still 3000 and does not move with it — that is what
+  # nginx.conf's `proxy_pass http://backend:3000/` targets.
   type: NodePort
   selector:
     # Matches the pod template labels below. Only pods that are additionally

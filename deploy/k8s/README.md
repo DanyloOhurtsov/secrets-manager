@@ -47,7 +47,7 @@ kind load docker-image postgres:16 redis:7 --name secrets-manager
 ## Zero to working install
 
 ```bash
-# 1. Create the cluster. Publishes node ports 30080/30000 to host 8080/3000.
+# 1. Create the cluster. Publishes node ports 30080/30000 to host 8081/3001.
 make cluster-up
 
 # 2. Build the two application images locally (tagged :dev, not :latest).
@@ -68,17 +68,24 @@ make bootstrap
 
 Then:
 
-- Dashboard — <http://localhost:8080> (log in with the token from step 5)
-- API — <http://localhost:3000> (landing page) / `/health` / `/info`
-- CLI — `export SECRETS_API_URL=http://localhost:3000` then
+- Dashboard — <http://localhost:8081> (log in with the token from step 5)
+- API — <http://localhost:3001> (landing page) / `/health` / `/info`
+- CLI — `export SECRETS_API_URL=http://localhost:3001` then
   `secrets login --token sm_…`
+
+> **Why 8081/3001 and not 8080/3000?** A docker compose stack occupies the
+> originals, so `kind-config.yaml` publishes one port higher. These are *host*
+> ports only. Nothing inside the cluster moved: the API Service is still on
+> 3000, and `nginx.conf`'s `proxy_pass http://backend:3000/` is unaffected.
+> If you are running the compose stack instead of kind, its URLs are still
+> 8080/3000 — see the root README.
 
 ### Verify
 
 ```bash
 make status
-curl -s http://localhost:3000/health
-curl -s http://localhost:8080/api/health   # proves the nginx -> backend proxy works
+curl -s http://localhost:3001/health
+curl -s http://localhost:8081/api/health   # proves the nginx -> backend proxy works
 ```
 
 `make status` should show `postgres-0`, one `db-migrate` pod `Completed`, and
@@ -116,9 +123,13 @@ effect.
 ## Day-2 loops
 
 ```bash
-# Changed backend or frontend code
+# Changed backend or frontend CODE (same manifest, new image)
 make build-images load-images
 kubectl -n secrets-manager rollout restart deployment/api deployment/dashboard
+
+# Changed a MANIFEST (.yaml) — restart alone does nothing here, see below
+kubectl -n secrets-manager apply -f deploy/k8s/50-dashboard.yaml
+# ...or just: make deploy
 
 # Changed ConfigMap or Secret values (env vars are read once at startup —
 # editing the object alone does NOTHING to running pods)
@@ -134,6 +145,19 @@ make logs                      # api by default
 make logs COMPONENT=dashboard
 make psql
 ```
+
+**`rollout restart` is not `apply`.** This catches people, and the failure is
+silent. `rollout restart` stamps an annotation on the Deployment that is
+*already in the cluster* and recreates its pods from that stored spec — it never
+looks at your files. Edit a manifest, run `rollout restart`, and you get brand
+new pods running the **old** spec, with a rollout that reports success.
+
+The tell is that the cluster keeps doing something your file no longer says:
+probes hitting port 80 while the manifest reads 8080, a container port that will
+not change, an added env var that never appears. `kubectl apply` is what sends
+the file; the restart is only needed afterwards for things pods read once at
+startup, like ConfigMap-sourced env vars. `make deploy` does both, in that
+order.
 
 ### Teardown
 
@@ -284,10 +308,34 @@ for interactive inspection of a process that is already running — which is why
 `make psql` (a shell against the Postgres StatefulSet) is fine and stays. It
 spawns a client, not a compiler, and it does not target a pod serving requests.
 
-Similarly the dashboard has no `runAsNonRoot`: stock nginx starts its master as
-root to bind port 80 and writes to `/var/cache/nginx`. Fixing that properly
-means `nginxinc/nginx-unprivileged`, a port above 1024, and emptyDir volumes —
-a `frontend/Dockerfile` change.
+### 11. `drop: ["ALL"]` broke nginx, and the error did not say so
+
+The dashboard used to run without `runAsNonRoot`, justified in the manifest by
+"stock nginx must be root to bind port 80". That explanation was wrong, and it
+sent debugging in the wrong direction.
+
+The pod crashed with:
+
+```
+nginx: [emerg] chown("/var/cache/nginx/client_temp", ...) Operation not permitted
+```
+
+The container *was* root. What it lacked was `CAP_CHOWN`, dropped by
+`capabilities: drop: ["ALL"]` in the same securityContext. **Root without
+capabilities is not root.** nginx chowns its cache directories at startup, that
+syscall was denied, and it aborted — before ever reaching a `listen()` call, so
+the privileged-port theory could not have been the cause.
+
+**Handled:** the fix was the base image, not the securityContext.
+`frontend/Dockerfile` uses `nginxinc/nginx-unprivileged`, which runs as uid 101,
+listens on 8080 (above 1024, so no `CAP_NET_BIND_SERVICE` either) and ships its
+cache paths already owned by that uid — nothing to chown. `50-dashboard.yaml`
+now sets `runAsNonRoot: true`, which makes the kubelet refuse the pod outright
+if the image is ever switched back to a root-assuming one.
+
+The general shape worth keeping: "runs as root" and "has the capability it
+needs" are independent, and dropping all capabilities breaks root-assuming
+images with errors that never mention capabilities.
 
 ### What is already Kubernetes-friendly
 
@@ -316,9 +364,12 @@ Worth knowing what you *don't* have to fix:
 | `db-migrate` never completes | Postgres unreachable, or a migration genuinely failed | `make migrate-logs` |
 | Dashboard loads, every API call 502s | The API Service is not named `backend`, or has no ready endpoints | `kubectl -n secrets-manager get endpoints backend` |
 | `field is immutable` applying the Job | Re-applying over a finished Job | `kubectl -n secrets-manager delete job db-migrate` first (`make deploy` does this) |
-| localhost:8080 refused | Cluster created without `kind-config.yaml`, so no port mapping exists | `make cluster-down cluster-up` — port mappings cannot be added to a live cluster |
+| localhost:8081 refused | Cluster created without `kind-config.yaml`, so no port mapping exists | `make cluster-down cluster-up` — port mappings cannot be added to a live cluster |
+| localhost:8080 / :3000 shows something unexpected | Those are the **docker compose** ports, not the cluster's. kind is on 8081/3001 | `docker compose ps` to see what is answering |
 | Config edit had no effect | Env vars are read once at container start | `make deploy` (it runs `rollout restart`) |
 | `make bootstrap` says a superadmin already exists | It is idempotent by design | Issue a new token via `POST /admin/identities/:id/tokens` |
+| `dashboard` `CrashLoopBackOff`; logs show `nginx: [emerg] chown("/var/cache/nginx/client_temp", ...) Operation not permitted` | A root-assuming nginx image plus `capabilities: drop: ["ALL"]`. Root without `CAP_CHOWN` cannot chown its cache dir, so nginx aborts at startup. Nothing to do with binding port 80 | Use `nginxinc/nginx-unprivileged` (uid 101) with a `listen` port above 1024 — see item 11. Do **not** "fix" it by re-adding capabilities |
+| Edited a manifest, ran `rollout restart`, nothing changed | `rollout restart` recreates pods from the spec **already stored in the cluster**. It never reads your files. Your edit is still on disk only | `kubectl apply -f <file>` (or `make deploy`) first, *then* the restart. Symptom to watch for: probes still hitting the old port while the file says the new one |
 
 Useful one-liners:
 

@@ -29,10 +29,18 @@ nodes:
       # hostPort      = the port on your Mac.
       #
       # A Service of `type: NodePort` opens its port on every node, so the chain
-      # is:  localhost:8080 -> node:30080 -> Service dashboard -> pod:80
+      # is:  localhost:8081 -> node:30080 -> Service dashboard -> pod:8080
       #
-      # NodePort values MUST fall in 30000-32767 (Kubernetes' default reserved
-      # range) — that is why they look arbitrary.
+      # Read that chain carefully — the three numbers are three different
+      # scopes, and only the first one is a host port:
+      #   8081  = hostPort, on your Mac. NOT 8080: a docker compose stack
+      #           already occupies 8080/3000, so the cluster moved up by one.
+      #   30080 = the NodePort. NodePort values MUST fall in 30000-32767
+      #           (Kubernetes' default reserved range), which is why they look
+      #           arbitrary. Unchanged by the host-port move.
+      #   8080  = the containerPort nginx listens on. It used to be 80; the
+      #           frontend image is nginxinc/nginx-unprivileged now, which runs
+      #           as uid 101 and listens above 1024. See 50-dashboard.yaml.
 
       # Dashboard (nginx serving the SPA + proxying /api -> backend).
       - containerPort: 30080
@@ -40,7 +48,11 @@ nodes:
         protocol: TCP
 
       # API, exposed directly so the `secrets` CLI can talk to it without a
-      # port-forward:  SECRETS_API_URL=http://localhost:3000
+      # port-forward:  SECRETS_API_URL=http://localhost:3001
+      #
+      # 3001 for the same reason as 8081 — compose has 3000. In-cluster the API
+      # is still on 3000 (Service `backend`, containerPort 3000); only the host
+      # side moved.
       - containerPort: 30000
         hostPort: 3001
         protocol: TCP

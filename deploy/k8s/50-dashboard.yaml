@@ -8,7 +8,7 @@
 #      stripping the /api prefix.
 #
 # Job 2 is why everything stays same-origin: the browser only ever talks to
-# localhost:8080, so the narrow CSP in backend/src/security.ts
+# localhost:8081, so the narrow CSP in backend/src/security.ts
 # (connect-src 'self') holds and no CORS configuration is needed anywhere.
 #
 # It is also the coupling flagged at the top of 40-api.yaml: `backend` is a
@@ -34,7 +34,13 @@ spec:
       port: 80
       targetPort: http
       # Paired with the extraPortMapping in kind-config.yaml:
-      #   localhost:8080 -> node:30080 -> Service dashboard -> pod:80
+      #   localhost:8081 -> node:30080 -> Service dashboard -> pod:8080
+      #
+      # Three different numbers, three different scopes: 8081 is the HOST port
+      # (8080 is taken by a docker compose stack), 30080 is the NodePort, and
+      # 8080 is the containerPort that nginx-unprivileged listens on. `port: 80`
+      # below is the Service's own cluster-internal port and is unrelated to any
+      # of them — targetPort resolves by NAME, so it lands on containerPort 8080.
       nodePort: 30080
       protocol: TCP
 
@@ -115,19 +121,39 @@ spec:
             limits: { cpu: 200m, memory: 128Mi }
 
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-            # Note there is no runAsNonRoot here, unlike every other workload in
-            # this deployment, and it is not laziness.
+
+            # WHAT ACTUALLY WENT WRONG HERE, because the original explanation
+            # was wrong and cost real time.
             #
-            # The stock nginx image starts its master process as root (it needs
-            # that to bind port 80, which is privileged) and then drops its
-            # WORKER processes to the unprivileged `nginx` user. It also writes
-            # to /var/cache/nginx and /var/run at startup.
+            # The story used to be "no runAsNonRoot because nginx must be root
+            # to bind port 80". That is true of the stock nginx image but it was
+            # never the failure. The pod crashed with:
             #
-            # Running it as non-root properly means a different base image
-            # (nginxinc/nginx-unprivileged), a listen port above 1024, and
-            # emptyDir volumes for the cache and pid paths. That is the right
-            # change to make eventually; it is a frontend/Dockerfile change, not
-            # a manifest one, so it does not belong in this pass.
+            #     nginx: [emerg] chown("/var/cache/nginx/client_temp", ...)
+            #     Operation not permitted
+            #
+            # The container WAS running as root. What it did not have was
+            # CAP_CHOWN, because `drop: ["ALL"]` above removes it. Root without
+            # capabilities is not root: nginx chowns its cache directories at
+            # startup, that syscall was denied, and it aborted. Binding a
+            # privileged port never entered into it — the process died before
+            # reaching a listen() call.
+            #
+            # This is worth remembering as a general shape: "runs as root" and
+            # "has the capability it needs" are separate things, and dropping
+            # ALL capabilities breaks root-assuming images in ways whose error
+            # messages do not mention capabilities at all.
+            #
+            # The fix was the base image, not the securityContext:
+            # frontend/Dockerfile now uses nginxinc/nginx-unprivileged, which
+            # runs as uid 101, listens on 8080 (above 1024, so no CAP_NET_BIND
+            # _SERVICE), and ships cache paths already owned by that uid — so
+            # there is nothing to chown and nothing to drop that it needs.
+            #
+            # runAsNonRoot: true is therefore now both correct and enforceable;
+            # it makes the kubelet refuse to start the pod if the image is ever
+            # switched back to one that would run as uid 0.

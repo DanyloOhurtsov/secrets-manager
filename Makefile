@@ -134,8 +134,10 @@ deploy: ## Apply all manifests in dependency order and wait for readiness
 
 	@echo ""
 	@echo "==> ready"
-	@echo "    dashboard  http://localhost:8080"
-	@echo "    API        http://localhost:3000"
+# Host ports are 8081/3001, not 8080/3000 -- a docker compose stack occupies the
+# originals. These must match kind-config.yaml's extraPortMappings.
+	@echo "    dashboard  http://localhost:8081"
+	@echo "    API        http://localhost:3001"
 	@echo "    next:      make bootstrap"
 
 undeploy: ## Delete the namespace (removes all workloads AND the Postgres PVC)
