@@ -1,0 +1,46 @@
+# kind (Kubernetes IN Docker) cluster definition.
+#
+#   kind create cluster --config kind-config.yaml
+#
+# kind runs each Kubernetes "node" as a Docker container on your machine. That
+# means the cluster network is isolated from your host in exactly the same way a
+# container network is: nothing inside is reachable from macOS unless you
+# publish a port. `extraPortMappings` is kind's equivalent of `docker run -p`.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+# Cluster name. kind prefixes the Docker container and the kubectl context with
+# it, so you get context "kind-secrets-manager". Keep it in sync with the
+# CLUSTER_NAME variable in the Makefile.
+name: secrets-manager
+
+nodes:
+  # A single node that runs BOTH the control plane (api-server, etcd,
+  # scheduler, controller-manager) and your workloads. Real clusters separate
+  # these; for learning, one node keeps everything visible in one place.
+  #
+  # Note kind auto-removes the control-plane NoSchedule taint when the cluster
+  # has no worker nodes, which is why your pods can land here at all.
+  - role: control-plane
+
+    extraPortMappings:
+      # containerPort = the port ON THE NODE (inside the kind Docker container).
+      # hostPort      = the port on your Mac.
+      #
+      # A Service of `type: NodePort` opens its port on every node, so the chain
+      # is:  localhost:8080 -> node:30080 -> Service dashboard -> pod:80
+      #
+      # NodePort values MUST fall in 30000-32767 (Kubernetes' default reserved
+      # range) — that is why they look arbitrary.
+
+      # Dashboard (nginx serving the SPA + proxying /api -> backend).
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+
+      # API, exposed directly so the `secrets` CLI can talk to it without a
+      # port-forward:  SECRETS_API_URL=http://localhost:3000
+      - containerPort: 30000
+        hostPort: 3000
+        protocol: TCP

@@ -1,0 +1,315 @@
+# The NestJS API: Deployment + Service.
+#
+# ############################################################################
+# # THE SERVICE MUST BE NAMED `backend`. NOT NEGOTIABLE.                     #
+# #                                                                          #
+# # frontend/nginx.conf contains `proxy_pass http://backend:3000/` and that  #
+# # file is COPYed into the frontend image at build time. In compose,        #
+# # `backend` resolved because that was the service name. Here it resolves   #
+# # only because this Service is called `backend` and lives in the same      #
+# # namespace, so cluster DNS answers the short name.                        #
+# #                                                                          #
+# # Rename it and the dashboard returns 502 with nginx logging               #
+# # "host not found in upstream", while the API itself is perfectly healthy. #
+# # This is build-time config leaking into deploy-time topology — the        #
+# # cleaner fix is to mount a ConfigMap over /etc/nginx/conf.d/default.conf  #
+# # so the upstream is deploy-time config. Noted in the README.              #
+# ############################################################################
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # NodePort opens a port on every node's IP *in addition to* allocating the
+  # normal internal ClusterIP. That dual nature is the point: one Service serves
+  # both the dashboard's in-cluster nginx (via ClusterIP name `backend`) and your
+  # `secrets` CLI on the host (via the node port).
+  #
+  # The chain to your Mac, completed by extraPortMappings in kind-config.yaml:
+  #   localhost:3000 -> kind node:30000 -> Service backend -> a ready pod:3000
+  type: NodePort
+  selector:
+    # Matches the pod template labels below. Only pods that are additionally
+    # passing their readinessProbe get traffic.
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 3000        # the ClusterIP port, i.e. what `backend:3000` means
+      targetPort: http  # by NAME, resolved against the container's named port.
+                        # Referencing the name rather than 3000 means changing
+                        # the container port does not silently break the Service.
+      nodePort: 30000   # must be within 30000-32767; pinned so kind's static
+                        # port mapping has something stable to point at
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # Two replicas on purpose, as a proof rather than for capacity.
+  #
+  # This app is genuinely stateless: sessions are rows in the Session table
+  # (SessionService hashes the token and does a DB lookup), API tokens are hashed
+  # DB lookups too, and Redis holds only a 30s verification cache. Nothing lives
+  # in process memory that a second pod would miss, so requests can land on
+  # either replica.
+  #
+  # The one caveat: if Redis is down, RedisThrottlerStorage degrades to a
+  # per-process in-memory counter, so N replicas means roughly N times the
+  # intended rate limit. Degraded, not broken.
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 = never drop below the desired replica count, so the
+      # rollout is genuinely zero-downtime. maxSurge: 1 = allow one extra pod
+      # while rolling. New pods must pass readiness before old ones are removed,
+      # which is what makes this safe.
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      initContainers:
+        # Gate #1 in the ordering story (gate #2 is `kubectl wait` on the Job in
+        # the Makefile). Blocks until Postgres answers AND the migration Job has
+        # created Prisma's bookkeeping table.
+        #
+        # Without this, PrismaService.onModuleInit() calls $connect(), the
+        # connection is refused, Nest's bootstrap throws, and the pod
+        # CrashLoopBackOffs until the database happens to appear. That *does*
+        # eventually converge — crash-and-retry is a legitimate Kubernetes
+        # ordering primitive — but it buries a real config error in a pile of
+        # identical-looking restarts. Failing in a named init container instead
+        # makes `kubectl get pods` say Init:0/1 and point straight at the cause.
+        - name: wait-for-migrations
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "waiting for postgres + applied migrations ..."
+              until psql "$DATABASE_URL" -tAc \
+                "select to_regclass('public._prisma_migrations') is not null" \
+                2>/dev/null | grep -qx t; do
+                sleep 2
+              done
+              echo "schema is present"
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_PORT }
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+
+      containers:
+        - name: api
+          image: secrets-manager-backend:dev
+          # IfNotPresent = use the node's local image if it has one, only pull
+          # otherwise. This is REQUIRED for the `kind load docker-image` workflow.
+          #
+          # And it is why the tag is `dev` and not `latest`: Kubernetes defaults
+          # imagePullPolicy to Always whenever the tag is `latest`, so a
+          # side-loaded `latest` image would be ignored and the kubelet would go
+          # ask docker.io for a repository that does not exist —
+          # ErrImagePull/ImagePullBackOff, with a perfectly good image sitting on
+          # the node. This trips up nearly everyone on their first kind cluster.
+          imagePullPolicy: IfNotPresent
+
+          # THE OTHER HALF OF THE MIGRATION SPLIT.
+          # The image's CMD is `npx prisma migrate deploy && node dist/src/main`.
+          # Overriding it with just the server means these 2 replicas never race
+          # to migrate. Migrations belong to the Job in 30-migrate-job.yaml.
+          #
+          # (dist/src/main, not dist/main: prisma.config.ts at the project root
+          # makes tsc root its output at backend/ and keep the src/ folder.)
+          command: ["node", "dist/src/main"]
+
+          ports:
+            # Named so the Service can use `targetPort: http`.
+            - name: http
+              containerPort: 3000
+
+          env:
+            # Same ordered composition as the migration Job — parts first, URL
+            # last. See 30-migrate-job.yaml for why $(VAR) needs this ordering.
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_PORT }
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+
+            # Plain ConfigMap values — no composition needed.
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: REDIS_URL }
+            - name: PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: PORT }
+            - name: ACTIVE_KEY_VERSION
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: ACTIVE_KEY_VERSION }
+
+            # The master key ring. KeyProvider validates this in its CONSTRUCTOR
+            # and throws — before Nest finishes building the module graph, before
+            # Express binds a port. So a bad key is not a failing probe, it is a
+            # pod that never starts. `kubectl logs` is the only place the reason
+            # appears. See the troubleshooting table in README.md.
+            - name: MASTER_KEYS
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: MASTER_KEYS }
+
+            # Not needed by the server itself, but `make bootstrap` does
+            # `kubectl exec deployment/api -- npx ts-node src/bootstrap.ts`, and
+            # npx needs a writable HOME. The node image does not set one, so
+            # under runAsUser: 1000 it would fall back to reading /etc/passwd.
+            - name: HOME
+              value: /home/node
+
+          # ---- PROBES ----------------------------------------------------
+          # GET /health is @Public(), so AuthGuard lets it through unauthenticated.
+          #
+          # BUT: @Public() only bypasses AuthGuard. ThrottlerGuard is registered
+          # first in app.module.ts and still counts these requests against the
+          # 100-per-minute-per-IP bucket. Probes come from the kubelet on the
+          # node, so all pods on a node share one bucket.
+          #
+          # The budget below is ~9 requests/min per pod (6 readiness + 3
+          # liveness); with 2 pods on kind's single node that is ~18/min against
+          # a 100/min limit. Comfortable — but tighten periodSeconds to 1s and
+          # you will rate-limit your own liveness probe into a restart loop that
+          # looks exactly like an application crash. That is a genuinely nasty
+          # interaction between an app-level defence and a platform-level health
+          # check, and it is worth remembering before you "make probes snappier".
+
+          # startupProbe runs FIRST and suspends the other two until it passes.
+          # It exists so slow starts and sick containers can have different
+          # deadlines: 30 x 2s = up to 60s to boot, while liveness stays strict
+          # afterwards. Without it you must either set a long
+          # livenessProbe.initialDelaySeconds (slow to detect real hangs) or risk
+          # killing a container that was merely still starting.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+            timeoutSeconds: 2
+
+          # readinessProbe = "should this pod receive traffic?" Failing removes
+          # the pod from the `backend` Service endpoints; it is NOT restarted.
+          # This is also what makes maxUnavailable: 0 rollouts actually safe.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+
+          # livenessProbe = "is this process wedged?" Failing gets the container
+          # KILLED and restarted. Slacker than readiness on purpose: restarting
+          # is a much bigger hammer than de-registering, and a restart loop
+          # caused by an over-eager liveness probe is a classic self-inflicted
+          # outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is deliberately left off, and it is worth
+            # knowing why since it looks like an oversight.
+            #
+            # The app itself would tolerate it: there is not a single fs write in
+            # backend/src (no uploads, no local cache, no log files — everything
+            # goes to stdout and Postgres). What does not tolerate it is the
+            # tooling in the same image — `npx` and the ts-node bootstrap script
+            # you run via `make bootstrap` both want a writable HOME.
+            #
+            # The proper fix is a smaller runtime image without the CLI tooling,
+            # at which point readOnlyRootFilesystem: true costs nothing.
+
+      # How long between SIGTERM and SIGKILL when a pod is being removed.
+      #
+      # Worth being precise about what this app actually does with SIGTERM,
+      # because it is less than you would assume: main.ts never calls
+      # app.enableShutdownHooks(), so Nest registers no signal handler and
+      # onModuleDestroy (PrismaService.$disconnect, CacheService.redis.quit)
+      # does NOT run. Node's default action for an unhandled SIGTERM is to
+      # terminate immediately — the exec-form `command` above makes node PID 1,
+      # so it receives the signal directly and dies at once.
+      #
+      # Practical impact is small here: requests are short, Postgres and Redis
+      # both reap dropped connections on their own, and readiness removal means
+      # the pod stops receiving new traffic before SIGTERM arrives. But in-flight
+      # requests ARE cut off rather than drained, so a rollout can return a
+      # handful of connection resets. Calling app.enableShutdownHooks() in
+      # main.ts is the one-line application change that makes this deployment
+      # genuinely zero-downtime.
+      terminationGracePeriodSeconds: 30

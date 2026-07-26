@@ -1,0 +1,133 @@
+# The React SPA served by nginx: Deployment + Service.
+#
+# This is the only thing you actually open in a browser. nginx does two jobs
+# (both defined in frontend/nginx.conf, baked into the image at build time):
+#   1. serve the built Vite assets, falling back to index.html so client-side
+#      routes work — the app has no router library, just history.pushState;
+#   2. reverse-proxy /api/ to http://backend:3000/, with the trailing slash
+#      stripping the /api prefix.
+#
+# Job 2 is why everything stays same-origin: the browser only ever talks to
+# localhost:8080, so the narrow CSP in backend/src/security.ts
+# (connect-src 'self') holds and no CORS configuration is needed anywhere.
+#
+# It is also the coupling flagged at the top of 40-api.yaml: `backend` is a
+# hostname compiled into this image, so the API Service must carry that exact
+# name in this exact namespace.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: dashboard
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # Paired with the extraPortMapping in kind-config.yaml:
+      #   localhost:8080 -> node:30080 -> Service dashboard -> pod:80
+      nodePort: 30080
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: dashboard
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # Static assets with zero server-side state — trivially horizontally scalable.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dashboard
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dashboard
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      containers:
+        - name: nginx
+          image: secrets-manager-frontend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+
+          # No env at all. The SPA is compiled to static files, so it has no
+          # runtime configuration to inject — api.ts hardcodes the relative path
+          # /api and reads its bearer token from localStorage.
+          #
+          # This is the usual SPA/Kubernetes friction: anything you would want to
+          # configure per-environment (an API base URL, a feature flag) was fixed
+          # at `npm run build` time and cannot be changed with a ConfigMap. The
+          # standard escapes are an entrypoint that rewrites a placeholder in the
+          # built JS, or fetching a /config.json at boot. This app sidesteps it
+          # entirely by being same-origin, which is the better answer.
+
+          # nginx has no dedicated health endpoint here, so we probe / — it
+          # returns index.html from disk. Cheap and sufficient: if nginx can
+          # serve that, it can serve the app.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          # Note these probes hit nginx only and never reach the API, so a
+          # dashboard pod reports Ready even when the backend is down. That is
+          # correct — the UI still loads and surfaces the API error itself — but
+          # it means "all pods Ready" is not the same as "the stack works".
+
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # Note there is no runAsNonRoot here, unlike every other workload in
+            # this deployment, and it is not laziness.
+            #
+            # The stock nginx image starts its master process as root (it needs
+            # that to bind port 80, which is privileged) and then drops its
+            # WORKER processes to the unprivileged `nginx` user. It also writes
+            # to /var/cache/nginx and /var/run at startup.
+            #
+            # Running it as non-root properly means a different base image
+            # (nginxinc/nginx-unprivileged), a listen port above 1024, and
+            # emptyDir volumes for the cache and pid paths. That is the right
+            # change to make eventually; it is a frontend/Dockerfile change, not
+            # a manifest one, so it does not belong in this pass.

@@ -1,0 +1,60 @@
+# NON-SENSITIVE configuration.
+#
+# A ConfigMap is just a named map of strings living in the cluster's etcd. It has
+# no encryption, no access control beyond RBAC, and shows up in plain text in
+# `kubectl get configmap -o yaml`. Anything you would be unhappy to see in a
+# screenshot belongs in 02-secret.yaml instead.
+#
+# Note what IS here: ACTIVE_KEY_VERSION. The *identifier* of the active master
+# key ("v1") is not a secret — only the 32 bytes of key material are. Splitting
+# them this way is deliberate and mirrors how KMS key IDs work.
+#
+# Gotcha: values consumed as env vars are read ONCE when the container starts.
+# Editing this ConfigMap does NOT restart anything. You need
+# `kubectl rollout restart deployment/api -n secrets-manager` (which `make deploy`
+# does for you).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/part-of: secrets-manager
+data:
+  # --- Postgres connection pieces -------------------------------------------
+  # These are the *components* of DATABASE_URL. The app wants one concatenated
+  # URL, so the API Deployment reassembles them with $(VAR) interpolation.
+  # See 40-api.yaml for why the split has to happen this way.
+  #
+  # POSTGRES_HOST is the name of the Service in 10-postgres.yaml. Kubernetes DNS
+  # turns that into an IP.
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "secrets_manager"
+  POSTGRES_USER: "dev"
+
+  # --- Redis -----------------------------------------------------------------
+  # "redis" is the Service name in 20-redis.yaml. The backend treats Redis as
+  # optional (CacheService swallows errors, RedisThrottlerStorage falls back to
+  # a per-process in-memory counter), so this is not a startup dependency.
+  REDIS_URL: "redis://redis:6379"
+
+  # --- API -------------------------------------------------------------------
+  # Every value in a ConfigMap must be a string. Quote numbers, or the YAML
+  # parser hands Kubernetes an int and the apply is rejected.
+  PORT: "3000"
+
+  # Which MASTER_KEYS entry new secrets get wrapped with. KeyProvider throws at
+  # construction if this version is not present in MASTER_KEYS — and because it
+  # throws in the constructor, the pod dies before it ever serves a probe.
+  ACTIVE_KEY_VERSION: "v1"
+
+  # TRUST_PROXY is intentionally ABSENT.
+  #
+  # The dashboard's nginx does set X-Forwarded-For, so it is tempting to set
+  # TRUST_PROXY=1 to get real client IPs for rate limiting. But this deployment
+  # also exposes the API directly on NodePort 30000 — so any client could send a
+  # forged X-Forwarded-For and walk straight past the IP throttler. Leaving it
+  # unset means Express uses the socket IP, which is always truthful.
+  # Set it only once the API is reachable *exclusively* through the proxy.

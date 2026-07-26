@@ -1,3 +1,4 @@
 node_modules
 .env
 dist
+deploy/k8s/02-secret.yaml

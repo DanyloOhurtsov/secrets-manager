@@ -1,0 +1,20 @@
+# A Namespace is a soft partition of the cluster: names only have to be unique
+# *within* one. That is what lets the API Service be called plainly "backend"
+# without colliding with anything else — and it matters here, because the
+# frontend image has `proxy_pass http://backend:3000/` baked into its nginx.conf.
+#
+# In-cluster DNS resolves short names within the same namespace, so a pod here
+# reaching "postgres" gets the full name postgres.secrets-manager.svc.cluster.local.
+#
+# Deleting the namespace deletes everything inside it — that is `make undeploy`.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secrets-manager
+  labels:
+    # Labels are arbitrary key/value tags used for selection and grouping.
+    # The app.kubernetes.io/* keys are the community-standard set; nothing
+    # enforces them, but tooling (kubectl, dashboards, Helm later) expects them.
+    app.kubernetes.io/name: secrets-manager
+    app.kubernetes.io/part-of: secrets-manager

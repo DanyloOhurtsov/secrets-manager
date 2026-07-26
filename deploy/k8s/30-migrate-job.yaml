@@ -1,0 +1,163 @@
+# Database migrations as a one-shot Job.
+#
+# WHY THIS EXISTS AT ALL — this is the single biggest change from docker-compose.
+#
+# backend/Dockerfile ends with:
+#     CMD ["sh", "-c", "npx prisma migrate deploy && node dist/src/main"]
+#
+# One container, one migration, correct. But a Deployment starts N pods, each
+# running that CMD, each racing to migrate the same database on every single
+# rollout. (`prisma migrate deploy` takes a Postgres advisory lock, so the losers
+# block rather than corrupt — but you are now serialising every pod's startup on
+# a lock and hiding schema changes inside a rollout you cannot observe.)
+#
+# So the two responsibilities get split:
+#   - this Job runs `prisma migrate deploy` exactly once, and you can see it
+#     succeed or fail on its own;
+#   - 40-api.yaml OVERRIDES the image's CMD with just `node dist/src/main`.
+#
+# The image is unchanged — it is single-stage with the full dependency tree, so
+# the Prisma CLI and prisma/migrations/ are present in both.
+#
+# JOB IMMUTABILITY: most of a Job's spec cannot be edited after creation, so
+# re-applying this file over a completed Job fails with "field is immutable".
+# `make deploy` deletes the old Job first. That is normal Job handling, not a
+# workaround.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: secrets-manager
+  labels:
+    app.kubernetes.io/name: db-migrate
+    app.kubernetes.io/component: migration
+    app.kubernetes.io/part-of: secrets-manager
+spec:
+  # How many times the whole Job may fail before it is marked Failed and stops
+  # retrying. Each retry creates a fresh pod with exponential backoff.
+  backoffLimit: 4
+
+  # Wall-clock ceiling. Without it, a Job wedged against an unreachable database
+  # retries until backoffLimit with ever-growing gaps and no upper bound.
+  activeDeadlineSeconds: 600
+
+  # Note there is NO ttlSecondsAfterFinished. The finished Job and its pod stick
+  # around on purpose so `kubectl logs job/db-migrate -n secrets-manager` still
+  # works after the fact — that log is where you find out which migration broke.
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: db-migrate
+        app.kubernetes.io/component: migration
+        app.kubernetes.io/part-of: secrets-manager
+    spec:
+      # OnFailure restarts the container in place; Never creates a whole new pod
+      # per attempt. A Job may not use the default `Always`, because a workload
+      # that is supposed to finish must be allowed to finish.
+      restartPolicy: OnFailure
+
+      # Init containers run to completion, one at a time, IN ORDER, before any
+      # app container starts. If one fails it is retried per restartPolicy.
+      # This is Kubernetes' answer to compose's `depends_on: condition:
+      # service_healthy` — there is no declarative cross-pod ordering, so you
+      # express dependencies by blocking on them yourself.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "waiting for postgres at $POSTGRES_HOST:$POSTGRES_PORT ..."
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -q; do
+                sleep 2
+              done
+              echo "postgres is accepting connections"
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_PORT }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_USER }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+
+      containers:
+        - name: migrate
+          # Locally built and side-loaded with `kind load docker-image`; see the
+          # imagePullPolicy note in 40-api.yaml for why the tag is NOT `latest`.
+          image: secrets-manager-backend:dev
+          imagePullPolicy: IfNotPresent
+
+          # Overrides the image's ENTRYPOINT/CMD. In Kubernetes vocabulary
+          # `command` == Docker's ENTRYPOINT and `args` == Docker's CMD, which is
+          # a genuinely confusing bit of naming if you come from Docker.
+          command: ["npx", "prisma", "migrate", "deploy"]
+
+          env:
+            # ---- THE CONFIG-SPLIT PROBLEM --------------------------------
+            # The app wants ONE string, DATABASE_URL, with the password embedded
+            # in it. But the password must live in a Secret and everything else
+            # belongs in a ConfigMap. You cannot reference half a value.
+            #
+            # The fix is Kubernetes' $(VAR) interpolation: kubelet expands
+            # references to variables defined EARLIER IN THIS SAME LIST. Hence
+            # the parts come first and the composed URL comes last.
+            #
+            # Two rules that bite people:
+            #   1. Order matters. A $(VAR) defined later expands to the literal
+            #      text "$(VAR)".
+            #   2. It only works for keys in this `env:` list. Variables pulled
+            #      in wholesale via `envFrom:` are NOT available to expansion,
+            #      which is exactly why this file does not use envFrom.
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_PORT }
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+
+            # backend/prisma.config.ts does `import "dotenv/config"`, which
+            # looks for a .env file. There is none in the image (.dockerignore
+            # excludes it) and dotenv never overrides variables that are already
+            # set, so the env above wins. Nothing to do — noted because a
+            # missing .env looks alarming in the logs and is not the problem.
+
+            # HOME is not set by the node image, and running as UID 1000 without
+            # it makes npx fall back to reading /etc/passwd. Being explicit
+            # avoids a class of "EACCES: permission denied, mkdir '/.npm'"
+            # failures that appear the moment you change runAsUser.
+            - name: HOME
+              value: /home/node
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000      # the `node` user baked into node:22-slim
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is NOT set here: npx wants a writable cache
+            # directory. See the note in 40-api.yaml.
+
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
