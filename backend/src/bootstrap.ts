@@ -27,15 +27,25 @@ async function main() {
     return;
   }
 
-  const identity = await prisma.identity.create({
-    data: { name: 'bootstrap-admin', type: 'human', isSuperadmin: true },
-  });
-
   const token = TOKEN_PREFIX + randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(token).digest('hex');
 
-  await prisma.token.create({
-    data: { identityId: identity.id, tokenHash, label: 'bootstrap' },
+  // Identity і Token створюємо ОДНІЄЮ транзакцією. Раніше це були два окремі
+  // запити, і збій між ними лишав superadmin без жодного токена: повторний
+  // запуск бачив existing і друкував BOOTSTRAP SKIPPED, а видати новий токен
+  // можна лише через /admin, куди без токена не зайти. Тупик, з якого виходили
+  // тільки скиданням БД. Як Job (60-bootstrap-job.yaml) скрипт ще й
+  // перезапускається автоматично, тож цей стан став реально досяжним.
+  const identity = await prisma.$transaction(async (tx) => {
+    const created = await tx.identity.create({
+      data: { name: 'bootstrap-admin', type: 'human', isSuperadmin: true },
+    });
+
+    await tx.token.create({
+      data: { identityId: created.id, tokenHash, label: 'bootstrap' },
+    });
+
+    return created;
   });
 
   console.log('\n=== BOOTSTRAP SUPERADMIN CREATED ===');

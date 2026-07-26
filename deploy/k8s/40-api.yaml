@@ -211,10 +211,16 @@ spec:
               valueFrom:
                 secretKeyRef: { name: app-secrets, key: MASTER_KEYS }
 
-            # Not needed by the server itself, but `make bootstrap` does
-            # `kubectl exec deployment/api -- npx ts-node src/bootstrap.ts`, and
-            # npx needs a writable HOME. The node image does not set one, so
-            # under runAsUser: 1000 it would fall back to reading /etc/passwd.
+            # Not needed by `node dist/src/main` itself. It is here for the
+            # `npx` in the image's CMD (`npx prisma migrate deploy`, the path
+            # docker-compose still uses): npx wants a writable HOME, and the node
+            # image does not set one, so under runAsUser: 1000 it falls back to
+            # reading /etc/passwd and can fail with EACCES mkdir '/.npm'.
+            #
+            # This used to be justified by `make bootstrap` exec-ing ts-node into
+            # this pod. That is gone — bootstrap is its own Job now
+            # (60-bootstrap-job.yaml) precisely because running it here
+            # OOM-killed the API.
             - name: HOME
               value: /home/node
 

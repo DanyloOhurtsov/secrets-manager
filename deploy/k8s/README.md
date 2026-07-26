@@ -16,6 +16,10 @@ that order, waiting at each gate.
 | `30-migrate-job.yaml` | `Job/db-migrate` — `prisma migrate deploy`, runs once |
 | `40-api.yaml` | `Service/backend` (NodePort 30000) + `Deployment/api` ×2 |
 | `50-dashboard.yaml` | `Service/dashboard` (NodePort 30080) + `Deployment/dashboard` ×2 |
+| `60-bootstrap-job.yaml` | `Job/bootstrap` — first superadmin + its token, run on demand |
+
+`60-bootstrap-job.yaml` is not applied by `make deploy` — it is an on-demand
+administrative task, run by `make bootstrap`.
 
 `kind-config.yaml` and the `Makefile` live at the repository root.
 
@@ -56,7 +60,8 @@ make load-images
 # 4. Apply everything in order and block until it is actually up.
 make deploy
 
-# 5. Create the first superadmin. Prints an sm_… token — copy it, it is
+# 5. Create the first superadmin. Runs Job/bootstrap in its own pod, prints
+#    its log, then deletes the Job. Prints an sm_… token — copy it, it is
 #    shown once. Idempotent: re-running just reports the existing superadmin.
 make bootstrap
 ```
@@ -250,9 +255,32 @@ left for you to make deliberately.
 
 Not an oversight. The app would tolerate it — there is not a single filesystem
 write in `backend/src` (no uploads, no local cache, logs go to stdout). What
-does not tolerate it is the tooling in the same image: `npx` and the `ts-node`
-bootstrap script both want a writable `HOME`. The real fix is a slimmer runtime
-image without the CLI tooling, at which point it costs nothing.
+does not tolerate it is the tooling in the same image: `npx` wants a writable
+`HOME`, and it is still on the boot path via the image's `CMD`. The real fix is
+a slimmer runtime image without the CLI tooling, at which point it costs
+nothing.
+
+(The `ts-node` bootstrap script used to be the other reason. It is gone — see
+item 10.)
+
+### 10. One-shot admin tasks must not run inside serving pods
+
+`make bootstrap` used to be `kubectl exec deployment/api -- npx ts-node
+src/bootstrap.ts`. That is a natural thing to reach for and it is wrong, because
+`kubectl exec` runs the command inside an existing container — sharing its
+cgroup, and therefore its memory limit. `npx ts-node` starts a second Node
+process and compiles TypeScript in memory, next to a NestJS app already using
+most of the 512Mi limit in `40-api.yaml`. The kernel resolved it by killing the
+largest process in the cgroup: the API. Both replicas terminated with
+`reason: OOMKilled`, `exitCode: 137`.
+
+**Handled:** `60-bootstrap-job.yaml` — its own pod, its own (smaller) limits,
+running compiled `node dist/src/bootstrap` rather than recompiling at runtime.
+
+The rule this leaves behind: **anything one-shot gets a Job.** `kubectl exec` is
+for interactive inspection of a process that is already running — which is why
+`make psql` (a shell against the Postgres StatefulSet) is fine and stays. It
+spawns a client, not a compiler, and it does not target a pod serving requests.
 
 Similarly the dashboard has no `runAsNonRoot`: stock nginx starts its master as
 root to bind port 80 and writes to `/var/cache/nginx`. Fixing that properly
@@ -298,6 +326,11 @@ kubectl -n secrets-manager get events --sort-by=.lastTimestamp | tail -20
 kubectl -n secrets-manager get endpoints backend      # empty => selector/readiness problem
 kubectl -n secrets-manager exec -it deployment/api -- env | grep -E 'DATABASE|REDIS|KEY'
 ```
+
+That last one does exec into a serving pod, which item 10 warns about — it is
+fine because `env` is a coreutil that allocates nothing measurable. The hazard is
+starting a *second heavy process* (a compiler, a migration, a bulk script) in a
+cgroup that is already near its limit, not exec itself.
 
 That last one is the fastest way to confirm the `$(VAR)` interpolation in
 `DATABASE_URL` actually resolved — if you see a literal `$(POSTGRES_PASSWORD)`

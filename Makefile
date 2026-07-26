@@ -159,10 +159,33 @@ status: ## Show pods, services and persistent volume claims
 	@echo "--- jobs ---"      && $(KUBECTL) get jobs
 
 bootstrap: ## Create the first superadmin and print its API token (run once)
-# Runs inside a live API pod so it inherits the pod's DATABASE_URL and needs no
-# local Node, .env, or database access from your host.
-	@$(KUBECTL) exec -it deployment/api -- npx ts-node src/bootstrap.ts
+# A Job, NOT `kubectl exec` into the API. The exec form ran `npx ts-node` inside
+# the serving container's cgroup and OOM-killed the API (exit 137). See the
+# header of 60-bootstrap-job.yaml.
+#
+# Job specs are largely immutable, so delete before apply -- same handling as
+# db-migrate in `deploy`.
+	@$(KUBECTL) delete job bootstrap --ignore-not-found
+	@$(KUBECTL) apply -f $(K8S_DIR)/60-bootstrap-job.yaml
+# A failed Job would otherwise sit here until the timeout with no explanation,
+# so dump the logs on failure and exit non-zero.
+	@$(KUBECTL) wait --for=condition=complete job/bootstrap --timeout=180s \
+		|| ( echo "!!! bootstrap job did not complete -- logs follow:"; \
+		     $(KUBECTL) logs job/bootstrap --all-containers --tail=100; \
+		     $(KUBECTL) delete job bootstrap --ignore-not-found; \
+		     exit 1 )
+	@echo ""
+	@$(KUBECTL) logs job/bootstrap
+# Delete only AFTER printing: the token exists nowhere else (the database stores
+# just its SHA-256 hash), so the log is the one delivery. Removing the Job then
+# takes the token back out of cluster state.
+	@$(KUBECTL) delete job bootstrap --ignore-not-found
 
 psql: ## Open a psql shell against the cluster's Postgres
+# This one stays `kubectl exec`, deliberately. An INTERACTIVE session against a
+# process that is already running is what exec is for -- there is nothing
+# one-shot to schedule. It also targets the database pod, not a pod serving HTTP,
+# and starts a psql client rather than a compiler, so it cannot repeat the
+# bootstrap OOM. The rule is "one-shot work gets a Job", not "never exec".
 	@$(KUBECTL) exec -it statefulset/postgres -- \
 		sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
