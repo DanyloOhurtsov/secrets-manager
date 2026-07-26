@@ -2,5 +2,8 @@ node_modules
 dist
 coverage
 .env
+.env.example
 *.log
+*.md
+test
 .git

@@ -161,9 +161,10 @@ rather than corrupt, but you have serialised startup on a lock and hidden schema
 changes inside a rollout.
 
 **Handled:** `30-migrate-job.yaml` owns migrations; `40-api.yaml` overrides
-`command` to just `node dist/src/main`. The image is unchanged — it is
-single-stage with the full dependency tree, so the Prisma CLI is in both.
-Compose still works exactly as before.
+`command` to just `node dist/src/main`. Both use the same image — multi-stage,
+production dependencies only, but with the Prisma CLI and `prisma/migrations/`
+deliberately retained because the Job needs them. Compose still works exactly as
+before, via the image's `CMD`.
 
 ### 2. `DATABASE_URL` is one string with the password inside it
 
@@ -255,13 +256,14 @@ left for you to make deliberately.
 
 Not an oversight. The app would tolerate it — there is not a single filesystem
 write in `backend/src` (no uploads, no local cache, logs go to stdout). What
-does not tolerate it is the tooling in the same image: `npx` wants a writable
-`HOME`, and it is still on the boot path via the image's `CMD`. The real fix is
-a slimmer runtime image without the CLI tooling, at which point it costs
-nothing.
+does not tolerate it is `npx`, which wants a writable `HOME` and is still on the
+boot path via the image's `CMD`.
 
-(The `ts-node` bootstrap script used to be the other reason. It is gone — see
-item 10.)
+Both of the other reasons are now gone: the `ts-node` bootstrap script (item 10)
+and the fat image. The runtime image is multi-stage and carries no compiler —
+only the Prisma CLI, which the migration Job genuinely needs. Turning
+`readOnlyRootFilesystem` on is now a small change: an `emptyDir` at `/tmp` plus
+one for the npm cache, or dropping `npx` from the `CMD` entirely.
 
 ### 10. One-shot admin tasks must not run inside serving pods
 

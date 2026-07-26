@@ -16,8 +16,11 @@
 #     succeed or fail on its own;
 #   - 40-api.yaml OVERRIDES the image's CMD with just `node dist/src/main`.
 #
-# The image is unchanged — it is single-stage with the full dependency tree, so
-# the Prisma CLI and prisma/migrations/ are present in both.
+# Both use the same image. It is multi-stage now (build tooling stays in the
+# build stage), but the Prisma CLI, prisma/schema.prisma and prisma/migrations/
+# are deliberately kept in the runtime stage — `migrate deploy` replays the SQL
+# files, so the schema alone would not be enough. `prisma` is declared in
+# `dependencies` for that reason.
 #
 # JOB IMMUTABILITY: most of a Job's spec cannot be edited after creation, so
 # re-applying this file over a completed Job fails with "field is immutable".
